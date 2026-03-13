@@ -1,7 +1,7 @@
 {
   "domain": "narwal",
   "name": "Narwal Robot Vacuum",
-  "codeowners": [],
+  "codeowners": ["@nadavbau"],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/nadavbaumer/narwal-ha",
