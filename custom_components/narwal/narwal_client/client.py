@@ -158,10 +158,31 @@ class NarwalClient:
         return raw_payload
 
     async def connect(self) -> None:
-        """Connect to MQTT broker."""
-        self._loop = asyncio.get_event_loop()
+        """Connect to MQTT broker.
+
+        All blocking I/O (SSL context, TCP connect) runs in an executor
+        so we don't block the HA event loop.
+        """
+        self._loop = asyncio.get_running_loop()
         self._connected.clear()
 
+        await self._loop.run_in_executor(None, self._setup_mqtt_client)
+
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            if self._client:
+                self._client.loop_stop()
+            raise NarwalConnectionError("MQTT connection timed out")
+
+        # Tell the vacuum an app client is active so it starts sending pushes
+        await self.notify_active()
+
+    def _setup_mqtt_client(self) -> None:
+        """Create the paho-mqtt client, configure TLS, and initiate connection.
+
+        Runs in an executor thread to avoid blocking the event loop.
+        """
         self._client = mqtt.Client(
             client_id=self._mqtt_client_id,
             protocol=mqtt.MQTTv5,
@@ -177,36 +198,28 @@ class NarwalClient:
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect
+        self._client.on_subscribe = self._on_subscribe
 
-        try:
-            self._client.connect(self.broker, self.port, keepalive=30)
-            self._client.loop_start()
-        except Exception as e:
-            raise NarwalConnectionError(f"Failed to connect to {self.broker}: {e}") from e
-
-        try:
-            await asyncio.wait_for(self._connected.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
-            self._client.loop_stop()
-            raise NarwalConnectionError("MQTT connection timed out")
-
-        # Tell the vacuum an app client is active so it starts sending pushes
-        await self.notify_active()
+        self._client.connect(self.broker, self.port, keepalive=30)
+        self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
         _LOGGER.info("MQTT connected: %s", reason_code)
         if str(reason_code) == "Success" or reason_code == 0:
             topic = f"{self.base_topic}/#"
             client.subscribe(topic, qos=1)
-            _LOGGER.info("Subscribed to %s", topic)
+            _LOGGER.info("Subscribing to %s", topic)
             if self._loop:
                 self._loop.call_soon_threadsafe(self._connected.set)
         else:
             _LOGGER.error("MQTT connection failed: %s", reason_code)
 
+    def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        _LOGGER.info("MQTT subscription result (mid=%s): %s", mid, reason_codes)
+
     def _on_message(self, client, userdata, msg):
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.debug("MQTT message: %s (%d bytes)", topic_suffix, len(msg.payload))
+        _LOGGER.info("MQTT << %s (%d bytes)", topic_suffix, len(msg.payload))
 
         # Check if this is a response to a pending command
         if msg.topic in self._pending_responses:
@@ -379,8 +392,15 @@ class NarwalClient:
 
     async def disconnect(self) -> None:
         """Disconnect from MQTT broker."""
-        if self._client:
-            self._client.loop_stop()
-            self._client.disconnect()
-            self._client = None
+        client = self._client
+        self._client = None
         self._connected.clear()
+        if client:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._stop_mqtt_client, client)
+
+    @staticmethod
+    def _stop_mqtt_client(client: mqtt.Client) -> None:
+        """Stop the paho-mqtt network loop and disconnect (blocking)."""
+        client.loop_stop()
+        client.disconnect()

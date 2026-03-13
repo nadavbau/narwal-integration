@@ -10,7 +10,7 @@ from homeassistant.components.vacuum import (
     VacuumActivity,
     VacuumEntityFeature,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
@@ -79,13 +79,6 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         return WORKING_STATUS_TO_ACTIVITY.get(
             state.working_status, VacuumActivity.IDLE
         )
-
-    @property
-    def battery_level(self) -> int | None:
-        state = self.coordinator.data
-        if state is None:
-            return None
-        return max(0, min(100, int(state.battery_level)))
 
     @property
     def fan_speed(self) -> str | None:

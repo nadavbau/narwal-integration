@@ -8,5 +8,5 @@
   "integration_type": "device",
   "iot_class": "cloud_push",
   "requirements": ["paho-mqtt>=2.0.0"],
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
