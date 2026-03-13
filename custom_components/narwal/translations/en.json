@@ -52,6 +52,11 @@
       "locate": {
         "name": "Locate"
       }
+    },
+    "camera": {
+      "map": {
+        "name": "Map"
+      }
     }
   }
 }

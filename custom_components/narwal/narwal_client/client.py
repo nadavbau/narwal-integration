@@ -26,6 +26,7 @@ from .const import (
     TOPIC_CMD_GET_CONFIG,
     TOPIC_CMD_GET_CONSUMABLE,
     TOPIC_CMD_GET_DEVICE_INFO,
+    TOPIC_CMD_GET_MAP,
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_RECALL,
     TOPIC_CMD_RESUME,
@@ -189,6 +190,9 @@ class NarwalClient:
             self._client.loop_stop()
             raise NarwalConnectionError("MQTT connection timed out")
 
+        # Tell the vacuum an app client is active so it starts sending pushes
+        await self.notify_active()
+
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
         _LOGGER.info("MQTT connected: %s", reason_code)
         if str(reason_code) == "Success" or reason_code == 0:
@@ -287,6 +291,14 @@ class NarwalClient:
 
     # --- High-level commands ---
 
+    async def notify_active(self) -> None:
+        """Announce this client to the vacuum, triggering push status broadcasts."""
+        try:
+            await self.send_command_no_response(TOPIC_CMD_ACTIVE_ROBOT)
+            _LOGGER.info("Sent active_robot notification")
+        except Exception:
+            _LOGGER.debug("active_robot notification failed", exc_info=True)
+
     async def locate(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_YELL)
 
@@ -331,24 +343,39 @@ class NarwalClient:
     async def get_consumable_info(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_GET_CONSUMABLE)
 
+    async def get_map(self) -> CommandResponse:
+        """Fetch the current map from the vacuum (longer timeout for large data)."""
+        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=30.0)
+
     async def request_status_update(self) -> None:
         """Request a status update from the vacuum.
 
-        The command triggers the vacuum to send a push broadcast on
+        The command also triggers the vacuum to send a push broadcast on
         status/robot_base_status, which _on_message handles separately.
         """
         try:
             resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS)
-            _LOGGER.debug(
-                "Status command response: success=%s, data_len=%d",
+            _LOGGER.info(
+                "Status response: success=%s, data=%d bytes, raw=%d bytes",
                 resp.success,
                 len(resp.data),
+                len(resp.raw),
             )
             if resp.success and resp.data:
                 self.state.update_base_status(resp.data)
                 self._notify_state_update()
+            elif resp.success and resp.raw:
+                # Some firmware returns status fields inline in the response
+                # rather than nested in a field-2 sub-message.
+                self.state.update_base_status(resp.raw)
+                self._notify_state_update()
+                _LOGGER.info(
+                    "Parsed inline status: battery=%.1f%%, status=%s",
+                    self.state.battery_level,
+                    self.state.working_status.name,
+                )
         except NarwalCommandError:
-            _LOGGER.debug("Status request timed out, relying on push broadcasts")
+            _LOGGER.warning("Status request timed out")
 
     async def disconnect(self) -> None:
         """Disconnect from MQTT broker."""

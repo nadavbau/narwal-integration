@@ -94,10 +94,17 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.client.on_state_update = self._on_state_update
         await self.client.request_status_update()
 
-        # The vacuum sends status as a push broadcast shortly after the command.
-        # Wait briefly so the state is populated before entities first render.
-        await asyncio.sleep(3)
-        self.async_set_updated_data(self.client.state)
+        # The vacuum responds to active_robot + get_base_status with push
+        # broadcasts. Wait for them to arrive before entities first render.
+        await asyncio.sleep(5)
+        state = self.client.state
+        _LOGGER.info(
+            "Initial state: battery=%.1f%%, status=%s, docked=%s",
+            state.battery_level,
+            state.working_status.name,
+            state.is_docked,
+        )
+        self.async_set_updated_data(state)
 
     async def _reauth(self) -> None:
         """Re-authenticate: try token refresh first, fall back to full login."""
