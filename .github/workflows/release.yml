@@ -1,0 +1,40 @@
+name: Release on version bump
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "custom_components/narwal/manifest.json"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get current version
+        id: current
+        run: |
+          version=$(jq -r '.version' custom_components/narwal/manifest.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Get previous version
+        id: previous
+        run: |
+          version=$(git show HEAD~1:custom_components/narwal/manifest.json | jq -r '.version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: steps.current.outputs.version != steps.previous.outputs.version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="v${{ steps.current.outputs.version }}"
+          gh release create "$version" \
+            --title "$version" \
+            --generate-notes \
+            --latest
