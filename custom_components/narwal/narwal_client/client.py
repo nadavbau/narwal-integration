@@ -43,6 +43,7 @@ from .const import (
 from .models import CommandResponse, NarwalState, parse_protobuf_fields
 
 _LOGGER = logging.getLogger(__name__)
+_PAHO_LOGGER = logging.getLogger(f"{__name__}.paho")
 
 
 class NarwalConnectionError(Exception):
@@ -183,11 +184,20 @@ class NarwalClient:
 
         Runs in an executor thread to avoid blocking the event loop.
         """
+        _LOGGER.warning(
+            "Connecting to %s:%d as client_id=%s, base_topic=%s",
+            self.broker,
+            self.port,
+            self._mqtt_client_id,
+            self.base_topic,
+        )
+
         self._client = mqtt.Client(
             client_id=self._mqtt_client_id,
             protocol=mqtt.MQTTv5,
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         )
+        self._client.enable_logger(_PAHO_LOGGER)
         self._client.username_pw_set(self._mqtt_username, self._mqtt_password)
 
         ctx = ssl.create_default_context()
@@ -204,22 +214,28 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.info("MQTT connected: %s", reason_code)
+        _LOGGER.warning("MQTT connected: %s", reason_code)
         if str(reason_code) == "Success" or reason_code == 0:
             topic = f"{self.base_topic}/#"
             client.subscribe(topic, qos=1)
-            _LOGGER.info("Subscribing to %s", topic)
+            _LOGGER.warning("Subscribing to %s", topic)
             if self._loop:
                 self._loop.call_soon_threadsafe(self._connected.set)
         else:
             _LOGGER.error("MQTT connection failed: %s", reason_code)
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
-        _LOGGER.info("MQTT subscription result (mid=%s): %s", mid, reason_codes)
+        _LOGGER.warning("MQTT subscription result (mid=%s): %s", mid, reason_codes)
 
     def _on_message(self, client, userdata, msg):
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.info("MQTT << %s (%d bytes)", topic_suffix, len(msg.payload))
+        _LOGGER.warning(
+            "MQTT << %s [full: %s] (%d bytes) pending=%s",
+            topic_suffix,
+            msg.topic,
+            len(msg.payload),
+            list(self._pending_responses.keys()),
+        )
 
         # Check if this is a response to a pending command
         if msg.topic in self._pending_responses:
@@ -279,8 +295,15 @@ class NarwalClient:
         props = self._build_publish_properties(topic, request_id)
         payload = self._build_user_payload() + extra_payload
 
-        self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.debug("Sent command: %s (request_id=%s)", command, request_id)
+        result = self._client.publish(topic, payload, qos=1, properties=props)
+        _LOGGER.warning(
+            "Published >> %s (%d bytes) rc=%s mid=%s, waiting on %s",
+            topic,
+            len(payload),
+            result.rc,
+            result.mid,
+            response_topic,
+        )
 
         try:
             response_data = await asyncio.wait_for(fut, timeout=timeout)
