@@ -1,0 +1,52 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Narwal Account Login",
+        "description": "Enter your Narwal app account credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "region": "Region"
+        }
+      },
+      "device": {
+        "title": "Device Selection",
+        "description": "Enter your vacuum's Product Key and Device Name.\n\n{discovered_devices}",
+        "data": {
+          "product_key": "Product Key",
+          "device_name": "Device Name (device ID)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Unable to connect to Narwal cloud servers.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  },
+  "entity": {
+    "vacuum": {
+      "narwal": {
+        "name": "Narwal Vacuum"
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      },
+      "status": {
+        "name": "Status"
+      },
+      "elapsed_time": {
+        "name": "Cleaning Time"
+      },
+      "cleaned_area": {
+        "name": "Cleaned Area"
+      }
+    }
+  }
+}
