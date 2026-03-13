@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -93,6 +94,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.client.on_state_update = self._on_state_update
         await self.client.request_status_update()
 
+        # The vacuum sends status as a push broadcast shortly after the command.
+        # Wait briefly so the state is populated before entities first render.
+        await asyncio.sleep(3)
+        self.async_set_updated_data(self.client.state)
+
     async def _reauth(self) -> None:
         """Re-authenticate: try token refresh first, fall back to full login."""
         if not self._cloud:
@@ -148,6 +154,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         if self.client.connected:
             await self.client.request_status_update()
+            # Allow time for the push broadcast the command triggers
+            await asyncio.sleep(2)
         return self.client.state
 
     async def async_shutdown(self) -> None:

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass, field
 from .const import WorkingStatus
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,6 +63,13 @@ class NarwalState:
         """
         fields = parse_protobuf_fields(payload)
         self.raw_base_status = fields
+        _LOGGER.debug(
+            "Parsed base status fields: %s",
+            {
+                k: (v.hex() if isinstance(v, bytes) else v)
+                for k, v in fields.items()
+            },
+        )
 
         # Field 2 = battery as IEEE 754 float32 (little-endian fixed32)
         if 2 in fields:

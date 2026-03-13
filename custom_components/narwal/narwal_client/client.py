@@ -215,9 +215,16 @@ class NarwalClient:
         payload = self._extract_app_payload(msg.payload)
 
         if topic_suffix == "status/robot_base_status":
+            _LOGGER.debug("Base status broadcast received (%d bytes)", len(payload))
             self.state.update_base_status(payload)
+            _LOGGER.debug(
+                "State after base status: battery=%.1f%%, status=%s",
+                self.state.battery_level,
+                self.state.working_status.name,
+            )
             self._notify_state_update()
         elif topic_suffix == "status/working_status":
+            _LOGGER.debug("Working status broadcast received (%d bytes)", len(payload))
             self.state.update_working_status(payload)
             self._notify_state_update()
 
@@ -325,14 +332,23 @@ class NarwalClient:
         return await self.send_command(TOPIC_CMD_GET_CONSUMABLE)
 
     async def request_status_update(self) -> None:
-        """Request a status update from the vacuum."""
+        """Request a status update from the vacuum.
+
+        The command triggers the vacuum to send a push broadcast on
+        status/robot_base_status, which _on_message handles separately.
+        """
         try:
             resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS)
+            _LOGGER.debug(
+                "Status command response: success=%s, data_len=%d",
+                resp.success,
+                len(resp.data),
+            )
             if resp.success and resp.data:
                 self.state.update_base_status(resp.data)
                 self._notify_state_update()
         except NarwalCommandError:
-            pass
+            _LOGGER.debug("Status request timed out, relying on push broadcasts")
 
     async def disconnect(self) -> None:
         """Disconnect from MQTT broker."""

@@ -42,10 +42,15 @@
         "name": "Status"
       },
       "elapsed_time": {
-        "name": "Cleaning Time"
+        "name": "Cleaning Time (Session)"
       },
       "cleaned_area": {
-        "name": "Cleaned Area"
+        "name": "Cleaned Area (Session)"
+      }
+    },
+    "button": {
+      "locate": {
+        "name": "Locate"
       }
     }
   }

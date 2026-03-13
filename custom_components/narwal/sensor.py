@@ -97,11 +97,12 @@ class NarwalStatusSensor(NarwalEntity, SensorEntity):
 
 
 class NarwalElapsedTimeSensor(NarwalEntity, SensorEntity):
-    """Cleaning elapsed time sensor."""
+    """Time elapsed in the current or most recent cleaning session."""
 
     _attr_translation_key = "elapsed_time"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_icon = "mdi:timer-outline"
 
     def __init__(self, coordinator: NarwalCoordinator) -> None:
         super().__init__(coordinator)
@@ -116,11 +117,12 @@ class NarwalElapsedTimeSensor(NarwalEntity, SensorEntity):
 
 
 class NarwalCleanedAreaSensor(NarwalEntity, SensorEntity):
-    """Cleaned area sensor."""
+    """Area covered in the current or most recent cleaning session."""
 
     _attr_translation_key = "cleaned_area"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "m²"
+    _attr_icon = "mdi:texture-box"
 
     def __init__(self, coordinator: NarwalCoordinator) -> None:
         super().__init__(coordinator)

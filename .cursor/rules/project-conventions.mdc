@@ -1,0 +1,33 @@
+---
+description: Project conventions for the Narwal Home Assistant integration
+alwaysApply: true
+---
+
+# Narwal HA Integration Conventions
+
+## Git Commit Messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) format:
+
+- `feat:` new features or entities
+- `fix:` bug fixes
+- `refactor:` code restructuring without behavior change
+- `docs:` documentation changes
+- `chore:` build, CI, dependencies
+
+Examples:
+- `feat: add locate button entity`
+- `fix: battery sensor showing 0% on startup`
+- `refactor: extract protobuf parsing into utility module`
+
+## Project Structure
+
+- `custom_components/narwal/` — Home Assistant integration
+- `custom_components/narwal/narwal_client/` — MQTT client library (protocol layer)
+- Keep HA-specific code (entities, config flow) separate from the MQTT client library
+
+## Code Style
+
+- Python 3.12+, type hints on all public functions
+- Use `from __future__ import annotations` in all modules
+- Follow Home Assistant coding standards for entity classes
