@@ -342,15 +342,6 @@ class NarwalClient:
         response_holder: list[bytes | None] = [None]
         self._pending_responses[response_topic] = (response_event, response_holder)
 
-        sub_event = threading.Event()
-        sub_result = self._client.subscribe(response_topic, qos=1)
-        sub_mid = sub_result[1]
-        self._pending_subacks[sub_mid] = sub_event
-        _LOGGER.debug("Subscribing to %s (mid=%s), waiting for SUBACK...", response_topic, sub_mid)
-
-        if not sub_event.wait(timeout=5.0):
-            _LOGGER.error("SUBACK timeout for %s (mid=%s)", response_topic, sub_mid)
-
         props = self._build_publish_properties(topic, request_id)
         if payload_override is not None:
             payload = payload_override
@@ -457,8 +448,8 @@ class NarwalClient:
         return await self.send_command(TOPIC_CMD_GET_CONSUMABLE)
 
     async def get_map(self) -> CommandResponse:
-        """Fetch the current map from the vacuum (longer timeout for large data)."""
-        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=30.0)
+        """Fetch the current map from the vacuum."""
+        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
 
     async def fetch_rooms(self) -> None:
         """Fetch the map and update the room list in self.state."""

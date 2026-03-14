@@ -90,7 +90,10 @@ async def run(
 
     # ── 4. Test commands ────────────────────────────────────────────
     log.info("─── Requesting status ───")
-    await client.request_status_update()
+    try:
+        await client.request_status_update()
+    except NarwalCommandError as e:
+        log.error("Status failed: %s", e)
 
     log.info("Waiting 5s for push broadcasts...")
     await asyncio.sleep(5)
@@ -109,6 +112,19 @@ async def run(
         log.info("Yell response: success=%s  code=%s", resp.success, resp.result_code)
     except NarwalCommandError as e:
         log.error("Yell failed: %s", e)
+
+    log.info("─── Fetching map ───")
+    try:
+        resp = await client.get_map()
+        log.info("Map response: success=%s  data=%d bytes  raw=%d bytes",
+                 resp.success, len(resp.data), len(resp.raw))
+    except NarwalCommandError as e:
+        log.error("Map failed: %s", e)
+
+    log.info("─── Fetching rooms ───")
+    await client.fetch_rooms()
+    for r in client.state.rooms:
+        log.info("  Room: id=%d  name=%s", r.room_id, r.display_name)
 
     # ── 5. Listen for pushes ────────────────────────────────────────
     log.info("─── Listening for 30s (press Ctrl-C to stop) ───")

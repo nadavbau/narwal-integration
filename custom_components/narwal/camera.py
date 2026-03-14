@@ -19,6 +19,7 @@ from .narwal_client.models import parse_protobuf_fields
 _LOGGER = logging.getLogger(__name__)
 
 MAP_CACHE_SECONDS = 120
+MAP_FAILURE_COOLDOWN = 300
 
 
 async def async_setup_entry(
@@ -46,6 +47,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
         )
         self._last_image: bytes | None = None
         self._last_fetch: float = 0.0
+        self._consecutive_map_failures: int = 0
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
@@ -55,17 +57,24 @@ class NarwalMapCamera(NarwalEntity, Camera):
             return self._last_image
 
         now = time.monotonic()
-        if now - self._last_fetch < MAP_CACHE_SECONDS and self._last_image:
+        cooldown = MAP_CACHE_SECONDS if self._consecutive_map_failures == 0 else MAP_FAILURE_COOLDOWN
+        if now - self._last_fetch < cooldown and self._last_image is not None:
             return self._last_image
 
         try:
             resp = await self.coordinator.client.get_map()
             self._last_fetch = now
         except Exception:
-            _LOGGER.debug("Map fetch failed", exc_info=True)
+            self._last_fetch = now
+            self._consecutive_map_failures += 1
+            _LOGGER.debug(
+                "Map fetch failed (attempt %d)", self._consecutive_map_failures,
+                exc_info=True,
+            )
             return self._last_image
 
         if not resp.data:
+            self._last_fetch = now
             return self._last_image
 
         try:
@@ -93,6 +102,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
 
             if image:
                 self._last_image = image
+                self._consecutive_map_failures = 0
         except Exception:
             _LOGGER.debug("Map render failed", exc_info=True)
 
