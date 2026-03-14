@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
-import struct
+import threading
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.properties import Properties
@@ -35,12 +34,10 @@ from .const import (
     TOPIC_CMD_START_CLEAN,
     TOPIC_CMD_START_PLAN,
     TOPIC_CMD_YELL,
-    TOPIC_ROBOT_BASE_STATUS,
-    TOPIC_WORKING_STATUS,
     FanLevel,
     MopHumidity,
 )
-from .models import CommandResponse, NarwalState, parse_protobuf_fields
+from .models import CommandResponse, NarwalState
 
 _LOGGER = logging.getLogger(__name__)
 _PAHO_LOGGER = logging.getLogger(f"{__name__}.paho")
@@ -102,9 +99,8 @@ class NarwalClient:
         self._mqtt_client_id = mqtt_client_id or f"app_{user_uuid}_{uuid.uuid4()}"
 
         self._client: mqtt.Client | None = None
-        self._connected = asyncio.Event()
+        self._connected = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._pending_responses: dict[str, asyncio.Future[bytes]] = {}
         self._tls_insecure = False
 
     @property
@@ -161,20 +157,21 @@ class NarwalClient:
     async def connect(self) -> None:
         """Connect to MQTT broker.
 
-        All blocking I/O (SSL context, TCP connect) runs in an executor
-        so we don't block the HA event loop.
+        All blocking I/O runs in an executor to avoid blocking HA's event loop.
+        Uses threading.Event instead of asyncio primitives to avoid
+        cross-thread future resolution issues in HA.
         """
         self._loop = asyncio.get_running_loop()
         self._connected.clear()
 
-        await self._loop.run_in_executor(None, self._setup_mqtt_client)
+        def _connect_blocking() -> None:
+            self._setup_mqtt_client()
+            if not self._connected.wait(timeout=15.0):
+                if self._client:
+                    self._client.loop_stop()
+                raise NarwalConnectionError("MQTT connection timed out")
 
-        try:
-            await asyncio.wait_for(self._connected.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
-            if self._client:
-                self._client.loop_stop()
-            raise NarwalConnectionError("MQTT connection timed out")
+        await self._loop.run_in_executor(None, _connect_blocking)
 
         # Tell the vacuum an app client is active so it starts sending pushes
         await self.notify_active()
@@ -184,7 +181,7 @@ class NarwalClient:
 
         Runs in an executor thread to avoid blocking the event loop.
         """
-        _LOGGER.warning(
+        _LOGGER.info(
             "Connecting to %s:%d as client_id=%s, base_topic=%s",
             self.broker,
             self.port,
@@ -214,61 +211,50 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.warning("MQTT connected: %s", reason_code)
+        _LOGGER.info("MQTT connected: %s", reason_code)
         if str(reason_code) == "Success" or reason_code == 0:
             topic = f"{self.base_topic}/#"
             client.subscribe(topic, qos=1)
-            _LOGGER.warning("Subscribing to %s", topic)
-            if self._loop:
-                self._loop.call_soon_threadsafe(self._connected.set)
+            _LOGGER.debug("Subscribing to %s", topic)
+            self._connected.set()
         else:
             _LOGGER.error("MQTT connection failed: %s", reason_code)
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
-        _LOGGER.warning("MQTT subscription result (mid=%s): %s", mid, reason_codes)
+        _LOGGER.debug("MQTT subscription result (mid=%s): %s", mid, reason_codes)
 
     def _on_message(self, client, userdata, msg):
+        """Handle incoming messages not matched by message_callback_add (broadcasts)."""
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.warning(
-            "MQTT << %s [full: %s] (%d bytes) pending=%s",
-            topic_suffix,
-            msg.topic,
-            len(msg.payload),
-            list(self._pending_responses.keys()),
-        )
+        _LOGGER.debug("MQTT << broadcast %s (%d bytes)", topic_suffix, len(msg.payload))
 
-        # Check if this is a response to a pending command
-        if msg.topic in self._pending_responses:
-            fut = self._pending_responses.pop(msg.topic)
-            if self._loop and not fut.done():
-                self._loop.call_soon_threadsafe(fut.set_result, msg.payload)
-            return
-
-        # Handle status broadcasts
         payload = self._extract_app_payload(msg.payload)
 
         if topic_suffix == "status/robot_base_status":
-            _LOGGER.debug("Base status broadcast received (%d bytes)", len(payload))
             self.state.update_base_status(payload)
             _LOGGER.debug(
-                "State after base status: battery=%.1f%%, status=%s",
+                "State after broadcast: battery=%.1f%%, status=%s",
                 self.state.battery_level,
                 self.state.working_status.name,
             )
             self._notify_state_update()
         elif topic_suffix == "status/working_status":
-            _LOGGER.debug("Working status broadcast received (%d bytes)", len(payload))
             self.state.update_working_status(payload)
             self._notify_state_update()
 
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
-        _LOGGER.warning("MQTT disconnected: %s", reason_code)
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._connected.clear)
+        _LOGGER.info("MQTT disconnected: %s", reason_code)
+        self._connected.clear()
 
     def _notify_state_update(self):
-        if self.on_state_update and self._loop:
-            self._loop.call_soon_threadsafe(self.on_state_update, self.state)
+        """Schedule a state update callback on the event loop (if available)."""
+        cb = self.on_state_update
+        loop = self._loop
+        if cb and loop:
+            try:
+                loop.call_soon_threadsafe(cb, self.state)
+            except RuntimeError:
+                pass
 
     async def send_command(
         self,
@@ -276,43 +262,56 @@ class NarwalClient:
         extra_payload: bytes = b"",
         timeout: float = COMMAND_RESPONSE_TIMEOUT,
     ) -> CommandResponse:
-        """Send a command and wait for response."""
+        """Send a command and wait for response.
+
+        The entire publish-and-wait runs in an executor thread using
+        threading.Event + message_callback_add, avoiding cross-thread
+        asyncio Future resolution which breaks in HA's event loop.
+        """
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
 
+        loop = self._loop or asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._send_command_blocking, command, extra_payload, timeout
+        )
+
+    def _send_command_blocking(
+        self, command: str, extra_payload: bytes, timeout: float
+    ) -> CommandResponse:
+        """Publish a command and block until the response arrives (runs in executor)."""
         topic = f"{self.base_topic}/{command}"
         response_topic = f"{topic}/response"
         request_id = str(uuid.uuid1())
 
-        # Subscribe to response topic
+        response_event = threading.Event()
+        response_holder: list[bytes | None] = [None]
+
+        def _on_response(_client, _userdata, msg):
+            _LOGGER.debug("MQTT << response for %s (%d bytes)", command, len(msg.payload))
+            response_holder[0] = msg.payload
+            response_event.set()
+
+        self._client.message_callback_add(response_topic, _on_response)
         self._client.subscribe(response_topic, qos=1)
 
-        # Create future for response
-        fut: asyncio.Future[bytes] = self._loop.create_future()
-        self._pending_responses[response_topic] = fut
-
-        # Build and send
         props = self._build_publish_properties(topic, request_id)
         payload = self._build_user_payload() + extra_payload
-
         result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.warning(
-            "Published >> %s (%d bytes) rc=%s mid=%s, waiting on %s",
-            topic,
-            len(payload),
-            result.rc,
-            result.mid,
-            response_topic,
+        _LOGGER.debug(
+            "Published >> %s (%d bytes) rc=%s mid=%s",
+            command, len(payload), result.rc, result.mid,
         )
 
         try:
-            response_data = await asyncio.wait_for(fut, timeout=timeout)
-            app_payload = self._extract_app_payload(response_data)
+            if not response_event.wait(timeout=timeout):
+                _LOGGER.error("Command timeout: %s (%.0fs)", command, timeout)
+                raise NarwalCommandError(f"Command {command} timed out")
+
+            app_payload = self._extract_app_payload(response_holder[0])
             return CommandResponse.from_payload(app_payload)
-        except asyncio.TimeoutError:
-            self._pending_responses.pop(response_topic, None)
-            _LOGGER.warning("Command timeout: %s", command)
-            raise NarwalCommandError(f"Command {command} timed out")
+        finally:
+            self._client.message_callback_remove(response_topic)
 
     async def send_command_no_response(self, command: str, extra_payload: bytes = b"") -> None:
         """Send a command without waiting for a response."""

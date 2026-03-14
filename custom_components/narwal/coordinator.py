@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import timedelta
 
@@ -94,9 +93,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.client.on_state_update = self._on_state_update
         await self.client.request_status_update()
 
-        # The vacuum responds to active_robot + get_base_status with push
-        # broadcasts. Wait for them to arrive before entities first render.
-        await asyncio.sleep(5)
         state = self.client.state
         _LOGGER.info(
             "Initial state: battery=%.1f%%, status=%s, docked=%s",
@@ -161,8 +157,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         if self.client.connected:
             await self.client.request_status_update()
-            # Allow time for the push broadcast the command triggers
-            await asyncio.sleep(2)
         return self.client.state
 
     async def async_shutdown(self) -> None:
