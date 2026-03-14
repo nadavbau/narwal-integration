@@ -1,4 +1,4 @@
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 const MODES = [
   { label: "Vacuum & Mop", icon: "mdi:robot-vacuum", value: "Vacuum & Mop" },
@@ -7,6 +7,13 @@ const MODES = [
   { label: "Mop", icon: "mdi:spray-bottle", value: "Mop Only" },
 ];
 
+/**
+ * Configuration options:
+ *   entity:          (required) vacuum entity ID
+ *   camera_entity:   (optional) camera entity ID for map — auto-detected if omitted
+ *   battery_entity:  (optional) battery sensor entity ID — auto-detected if omitted
+ *   mode_entity:     (optional) clean mode select entity ID — auto-detected if omitted
+ */
 class NarwalVacuumCard extends HTMLElement {
   constructor() {
     super();
@@ -27,10 +34,19 @@ class NarwalVacuumCard extends HTMLElement {
   setConfig(config) {
     if (!config.entity) throw new Error("'entity' is required (vacuum entity ID)");
     this._config = { ...config };
+    if (this._initialized) {
+      this._initialized = false;
+      this.shadowRoot?.innerHTML && (this.shadowRoot.innerHTML = "");
+    }
   }
 
   static getStubConfig() {
-    return { entity: "vacuum.narwal_vacuum" };
+    return {
+      entity: "vacuum.narwal_vacuum",
+      camera_entity: "",
+      battery_entity: "",
+      mode_entity: "",
+    };
   }
 
   getCardSize() {
@@ -38,9 +54,12 @@ class NarwalVacuumCard extends HTMLElement {
   }
 
   _build() {
-    if (this.shadowRoot) return;
-    const shadow = this.attachShadow({ mode: "open" });
-    shadow.innerHTML = `
+    if (this.shadowRoot) {
+      this.shadowRoot.innerHTML = "";
+    } else {
+      this.attachShadow({ mode: "open" });
+    }
+    this.shadowRoot.innerHTML = `
       <ha-card>
         <style>
           :host { --primary: var(--primary-color, #03a9f4); }
@@ -113,8 +132,8 @@ class NarwalVacuumCard extends HTMLElement {
       </ha-card>
     `;
 
-    shadow.getElementById("select-all").addEventListener("click", () => this._selectAll());
-    shadow.getElementById("select-none").addEventListener("click", () => this._selectNone());
+    this.shadowRoot.getElementById("select-all").addEventListener("click", () => this._selectAll());
+    this.shadowRoot.getElementById("select-none").addEventListener("click", () => this._selectNone());
     this._buildModes();
     this._buildActions();
   }
@@ -166,6 +185,31 @@ class NarwalVacuumCard extends HTMLElement {
     container.appendChild(locateBtn);
   }
 
+  /* --- Entity resolution (explicit config > auto-detect) --- */
+
+  _resolveCameraEntity() {
+    if (this._config.camera_entity) return this._config.camera_entity;
+    return Object.keys(this._hass.states).find(
+      e => e.startsWith("camera.") && e.includes("narwal")
+    ) || null;
+  }
+
+  _resolveBatteryEntity() {
+    if (this._config.battery_entity) return this._config.battery_entity;
+    return Object.keys(this._hass.states).find(
+      e => e.startsWith("sensor.") && e.includes("narwal") && e.includes("battery")
+    ) || null;
+  }
+
+  _resolveModeEntity() {
+    if (this._config.mode_entity) return this._config.mode_entity;
+    return Object.keys(this._hass.states).find(
+      e => e.startsWith("select.") && e.includes("narwal") && e.includes("clean_mode")
+    ) || null;
+  }
+
+  /* --- Update cycle --- */
+
   _update() {
     if (!this._hass || !this._config) return;
     const entity = this._hass.states[this._config.entity];
@@ -194,16 +238,13 @@ class NarwalVacuumCard extends HTMLElement {
   }
 
   _getBatteryLevel() {
-    if (this._config.battery_entity) {
-      const s = this._hass.states[this._config.battery_entity];
-      if (s) return parseFloat(s.state);
+    const batteryEntity = this._resolveBatteryEntity();
+    if (batteryEntity) {
+      const s = this._hass.states[batteryEntity];
+      if (s && !isNaN(parseFloat(s.state))) return parseFloat(s.state);
     }
     const entity = this._hass.states[this._config.entity];
     if (entity?.attributes.battery_level != null) return entity.attributes.battery_level;
-    const found = Object.keys(this._hass.states).find(
-      e => e.startsWith("sensor.") && e.includes("narwal") && e.includes("battery")
-    );
-    if (found) return parseFloat(this._hass.states[found].state);
     return null;
   }
 
@@ -246,15 +287,8 @@ class NarwalVacuumCard extends HTMLElement {
     }
   }
 
-  _findCameraEntity() {
-    if (this._config.camera) return this._config.camera;
-    return Object.keys(this._hass.states).find(
-      e => e.startsWith("camera.") && e.includes("narwal")
-    ) || null;
-  }
-
   _updateMap() {
-    const cameraEntity = this._findCameraEntity();
+    const cameraEntity = this._resolveCameraEntity();
     const mapContainer = this.shadowRoot.querySelector(".map-container");
     if (!cameraEntity || !this._hass.states[cameraEntity]) {
       mapContainer.innerHTML = `<span class="no-map">No map available</span>`;
@@ -316,7 +350,7 @@ class NarwalVacuumCard extends HTMLElement {
   }
 
   _syncModeEntity() {
-    const modeEntity = this._findModeEntity();
+    const modeEntity = this._resolveModeEntity();
     if (!modeEntity) return;
     this._hass.callService("select", "select_option", {
       entity_id: modeEntity,
@@ -325,19 +359,13 @@ class NarwalVacuumCard extends HTMLElement {
   }
 
   _syncModeFromEntity() {
-    const modeEntity = this._findModeEntity();
+    const modeEntity = this._resolveModeEntity();
     if (!modeEntity) return;
     const state = this._hass.states[modeEntity];
     if (state && state.state !== this._selectedMode && MODES.some(m => m.value === state.state)) {
       this._selectedMode = state.state;
       this._updateModes();
     }
-  }
-
-  _findModeEntity() {
-    if (this._config.mode_entity) return this._config.mode_entity;
-    const allEntities = Object.keys(this._hass.states);
-    return allEntities.find(e => e.startsWith("select.") && e.includes("narwal") && e.includes("clean_mode"));
   }
 
   _startClean() {
