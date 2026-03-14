@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import logging
 import time
 import zlib
@@ -14,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
+from .narwal_client.map_renderer import render_map
 from .narwal_client.models import parse_protobuf_fields
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,114 +65,35 @@ class NarwalMapCamera(NarwalEntity, Camera):
             _LOGGER.debug("Map fetch failed", exc_info=True)
             return self._last_image
 
-        if not resp.raw:
+        if not resp.data:
             return self._last_image
 
-        _LOGGER.info("Map response: %d raw bytes, success=%s", len(resp.raw), resp.success)
-
-        fields = parse_protobuf_fields(resp.raw)
-        _LOGGER.info(
-            "Map protobuf fields: %s",
-            {
-                k: (
-                    f"bytes({len(v)})"
-                    if isinstance(v, bytes)
-                    else f"str({len(v)})"
-                    if isinstance(v, str)
-                    else v
-                )
-                for k, v in fields.items()
-            },
-        )
-
-        image = self._try_render_map(fields)
-        if image:
-            self._last_image = image
-        return self._last_image
-
-    def _try_render_map(self, fields: dict) -> bytes | None:
-        """Attempt to extract or render a map image from the protobuf fields.
-
-        Tries multiple strategies since the exact format is being discovered.
-        """
-        for field_num, val in fields.items():
-            if not isinstance(val, bytes) or len(val) < 100:
-                continue
-
-            # Check for raw PNG/JPEG signatures
-            if val[:8] == b'\x89PNG\r\n\x1a\n':
-                _LOGGER.info("Found PNG image in field %d", field_num)
-                return val
-            if val[:2] in (b'\xff\xd8',):
-                _LOGGER.info("Found JPEG image in field %d", field_num)
-                return val
-
-            # Try zlib decompression
-            try:
-                decompressed = zlib.decompress(val)
-                _LOGGER.info(
-                    "Decompressed field %d: %d -> %d bytes",
-                    field_num,
-                    len(val),
-                    len(decompressed),
-                )
-                if decompressed[:8] == b'\x89PNG\r\n\x1a\n':
-                    return decompressed
-                # Might be raw pixel grid -- try rendering
-                return self._render_grid(decompressed, fields)
-            except zlib.error:
-                pass
-
-            # Try nested protobuf for image data
-            try:
-                nested = parse_protobuf_fields(val)
-                for nk, nv in nested.items():
-                    if isinstance(nv, bytes) and len(nv) > 100:
-                        if nv[:8] == b'\x89PNG\r\n\x1a\n':
-                            return nv
-                        try:
-                            dec = zlib.decompress(nv)
-                            if dec[:8] == b'\x89PNG\r\n\x1a\n':
-                                return dec
-                        except zlib.error:
-                            pass
-            except Exception:
-                pass
-
-        return None
-
-    def _render_grid(self, data: bytes, fields: dict) -> bytes | None:
-        """Render raw grid data as a simple PNG (grayscale)."""
         try:
-            from PIL import Image
+            fields = parse_protobuf_fields(resp.data)
+            grid_width = fields.get(4, 0)
+            grid_height = fields.get(5, 0)
+            compressed_grid = fields.get(17, b"")
 
-            width = 0
-            height = 0
-            for k, v in fields.items():
-                if isinstance(v, int) and 100 < v < 2000:
-                    if width == 0:
-                        width = v
-                    elif height == 0:
-                        height = v
-                        break
+            if not isinstance(compressed_grid, bytes) or grid_width <= 0 or grid_height <= 0:
+                _LOGGER.debug(
+                    "Map missing required fields: w=%s h=%s grid=%d bytes",
+                    grid_width, grid_height,
+                    len(compressed_grid) if isinstance(compressed_grid, bytes) else 0,
+                )
+                return self._last_image
 
-            if width == 0 or height == 0:
-                side = int(len(data) ** 0.5)
-                if side * side == len(data):
-                    width = height = side
-                else:
-                    return None
+            room_names = {
+                r.room_id: r.display_name
+                for r in self.coordinator.client.state.rooms
+            }
 
-            if width * height > len(data):
-                return None
+            image = await self.hass.async_add_executor_job(
+                render_map, compressed_grid, grid_width, grid_height, room_names,
+            )
 
-            img = Image.frombytes("L", (width, height), data[: width * height])
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            return buf.getvalue()
-        except ImportError:
-            _LOGGER.debug("Pillow not installed, cannot render grid map")
-            return None
+            if image:
+                self._last_image = image
         except Exception:
-            _LOGGER.debug("Grid render failed", exc_info=True)
-            return None
+            _LOGGER.debug("Map render failed", exc_info=True)
+
+        return self._last_image
