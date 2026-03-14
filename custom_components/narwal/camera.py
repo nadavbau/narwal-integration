@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 import zlib
-from datetime import timedelta
 
 from homeassistant.components.camera import Camera
 from homeassistant.core import HomeAssistant
@@ -18,7 +18,7 @@ from .narwal_client.models import parse_protobuf_fields
 
 _LOGGER = logging.getLogger(__name__)
 
-MAP_REFRESH_INTERVAL = timedelta(seconds=120)
+MAP_CACHE_SECONDS = 120
 
 
 async def async_setup_entry(
@@ -45,6 +45,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
             f"{coordinator.config_entry.data['device_name']}_map"
         )
         self._last_image: bytes | None = None
+        self._last_fetch: float = 0.0
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
@@ -53,8 +54,13 @@ class NarwalMapCamera(NarwalEntity, Camera):
         if not self.coordinator.client.connected:
             return self._last_image
 
+        now = time.monotonic()
+        if now - self._last_fetch < MAP_CACHE_SECONDS and self._last_image:
+            return self._last_image
+
         try:
             resp = await self.coordinator.client.get_map()
+            self._last_fetch = now
         except Exception:
             _LOGGER.debug("Map fetch failed", exc_info=True)
             return self._last_image

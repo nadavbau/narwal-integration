@@ -106,6 +106,9 @@ class NarwalClient:
         self._pending_responses: dict[str, tuple[threading.Event, list[bytes | None]]] = {}
         # SUBACK tracking: mid -> Event
         self._pending_subacks: dict[int, threading.Event] = {}
+        # Per-command locks to prevent concurrent calls to the same command
+        # from colliding in _pending_responses (same response topic key).
+        self._command_locks: dict[str, threading.Lock] = {}
 
     @property
     def base_topic(self) -> str:
@@ -307,11 +310,30 @@ class NarwalClient:
             None, self._send_command_blocking, command, extra_payload, timeout, payload_override
         )
 
+    def _get_command_lock(self, command: str) -> threading.Lock:
+        """Get or create a per-command lock to serialise concurrent calls."""
+        if command not in self._command_locks:
+            self._command_locks[command] = threading.Lock()
+        return self._command_locks[command]
+
     def _send_command_blocking(
         self, command: str, extra_payload: bytes, timeout: float,
         payload_override: bytes | None = None,
     ) -> CommandResponse:
-        """Publish a command and block until the response arrives (runs in executor)."""
+        """Publish a command and block until the response arrives (runs in executor).
+
+        A per-command lock prevents concurrent calls to the same command from
+        colliding -- they share the same response topic key in _pending_responses,
+        so the second call would overwrite the first and both would timeout.
+        """
+        lock = self._get_command_lock(command)
+        with lock:
+            return self._send_command_locked(command, extra_payload, timeout, payload_override)
+
+    def _send_command_locked(
+        self, command: str, extra_payload: bytes, timeout: float,
+        payload_override: bytes | None = None,
+    ) -> CommandResponse:
         topic = f"{self.base_topic}/{command}"
         response_topic = f"{topic}/response"
         request_id = str(uuid.uuid1())
@@ -320,9 +342,6 @@ class NarwalClient:
         response_holder: list[bytes | None] = [None]
         self._pending_responses[response_topic] = (response_event, response_holder)
 
-        # Narwal's broker requires an explicit subscription to the response
-        # topic; the wildcard (/.../#) alone doesn't route responses.
-        # We MUST wait for the SUBACK before publishing to avoid a race.
         sub_event = threading.Event()
         sub_result = self._client.subscribe(response_topic, qos=1)
         sub_mid = sub_result[1]
