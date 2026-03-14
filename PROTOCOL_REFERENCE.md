@@ -431,16 +431,16 @@ Each field 12 entry is a sub-message:
 | 2     | Bedroom          | Secondary bedroom                   |
 | 3     | Living Room      |                                     |
 | 4     | Kitchen          |                                     |
-| 5     | Study            |                                     |
-| 6     | Bathroom         |                                     |
+| 5     | Bathroom         | APK says "Study" — user confirmed Bathroom |
+| 6     | Toilet           | APK says "Bathroom" — user confirmed Toilet |
 | 7     | Dining Room      | APK says "Corridor" but app shows "Dining Room" for some users |
 | 8     | Dining Room      | APK says "Corridor" — user confirmed Dining Room |
 | 9     | Balcony          |                                     |
 | 10    | Utility Room     |                                     |
-| 11    | Storage Room     | APK says "Cloak Room"               |
+| 11    | Study            | APK says "Cloak Room" — user confirmed Study |
 | 12    | Nursery          |                                     |
 | 13    | Recreation Room  |                                     |
-| 14    | Toilet           | APK says "Shower Room"              |
+| 14    | Storage Room     | APK says "Shower Room" — user confirmed Storage Room |
 | 15    | Other            |                                     |
 
 **Note**: Sub-types 7, 8, 11, and 14 have discrepancies between the APK

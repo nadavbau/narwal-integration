@@ -171,7 +171,7 @@ class NarwalVacuumCard extends HTMLElement {
     const entity = this._hass.states[this._config.entity];
     if (!entity) return;
 
-    const battery = entity.attributes.battery_level;
+    const battery = this._getBatteryLevel();
     const state = entity.state;
     const rooms = entity.attributes.rooms || {};
 
@@ -191,6 +191,20 @@ class NarwalVacuumCard extends HTMLElement {
     this._updateMap();
     this._updateStartButton(state);
     this._syncModeFromEntity();
+  }
+
+  _getBatteryLevel() {
+    if (this._config.battery_entity) {
+      const s = this._hass.states[this._config.battery_entity];
+      if (s) return parseFloat(s.state);
+    }
+    const entity = this._hass.states[this._config.entity];
+    if (entity?.attributes.battery_level != null) return entity.attributes.battery_level;
+    const found = Object.keys(this._hass.states).find(
+      e => e.startsWith("sensor.") && e.includes("narwal") && e.includes("battery")
+    );
+    if (found) return parseFloat(this._hass.states[found].state);
+    return null;
   }
 
   _updateRooms(rooms) {
@@ -232,11 +246,18 @@ class NarwalVacuumCard extends HTMLElement {
     }
   }
 
+  _findCameraEntity() {
+    if (this._config.camera) return this._config.camera;
+    return Object.keys(this._hass.states).find(
+      e => e.startsWith("camera.") && e.includes("narwal")
+    ) || null;
+  }
+
   _updateMap() {
-    const cameraEntity = this._config.camera;
+    const cameraEntity = this._findCameraEntity();
     const mapContainer = this.shadowRoot.querySelector(".map-container");
     if (!cameraEntity || !this._hass.states[cameraEntity]) {
-      mapContainer.innerHTML = `<span class="no-map">No map configured</span>`;
+      mapContainer.innerHTML = `<span class="no-map">No map available</span>`;
       return;
     }
     const cam = this._hass.states[cameraEntity];
