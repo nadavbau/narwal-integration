@@ -276,7 +276,7 @@ class NarwalClient:
             self._notify_state_update()
 
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
-        _LOGGER.info("MQTT disconnected: %s", reason_code)
+        _LOGGER.warning("MQTT disconnected: %s", reason_code)
         self._connected.clear()
 
     def _notify_state_update(self):
@@ -499,6 +499,7 @@ class NarwalClient:
                 )
         except NarwalCommandError:
             _LOGGER.warning("Status request timed out")
+            raise
 
     async def disconnect(self) -> None:
         """Disconnect from MQTT broker."""

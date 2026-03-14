@@ -1,4 +1,4 @@
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "1.3.0";
 
 const MODES = [
   { label: "Vacuum & Mop", icon: "mdi:robot-vacuum", value: "Vacuum & Mop" },
@@ -8,113 +8,65 @@ const MODES = [
 ];
 
 /* ================================================================
- *  Visual Config Editor
+ *  Visual Config Editor  (uses ha-form for reliable rendering)
  * ================================================================ */
+
+const EDITOR_SCHEMA = [
+  { name: "entity", required: true, selector: { entity: { domain: "vacuum" } } },
+  { name: "camera_entity", selector: { entity: { domain: "camera" } } },
+  { name: "battery_entity", selector: { entity: { domain: "sensor" } } },
+  { name: "mode_entity", selector: { entity: { domain: "select" } } },
+];
 
 class NarwalVacuumCardEditor extends HTMLElement {
   _config = {};
   _hass = null;
-  _rendered = false;
-
-  static get FIELDS() {
-    return [
-      { key: "entity",         label: "Vacuum Entity *",    domain: "vacuum",  required: true },
-      { key: "camera_entity",  label: "Camera Entity (Map)", domain: "camera" },
-      { key: "battery_entity", label: "Battery Sensor",      domain: "sensor" },
-      { key: "mode_entity",    label: "Clean Mode Select",   domain: "select" },
-    ];
-  }
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._rendered) {
-      this._buildEditor();
-      this._rendered = true;
-    }
-    this._updatePickers();
+    this._render();
   }
 
   setConfig(config) {
     this._config = { ...config };
-    if (this._rendered) this._updatePickers();
+    this._render();
   }
 
-  _buildEditor() {
-    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
-    this.shadowRoot.innerHTML = "";
+  _render() {
+    if (!this._hass) return;
 
-    const style = document.createElement("style");
-    style.textContent = `
-      .editor { padding: 8px 0; }
-      .row { margin-bottom: 16px; }
-      .row label { display: block; font-size: 0.85em; font-weight: 500;
-        margin-bottom: 4px; color: var(--primary-text-color); }
-      .hint { font-size: 0.75em; color: var(--secondary-text-color); margin-top: 2px; }
-    `;
-    this.shadowRoot.appendChild(style);
-
-    const container = document.createElement("div");
-    container.className = "editor";
-    this.shadowRoot.appendChild(container);
-
-    this._pickers = {};
-
-    for (const field of NarwalVacuumCardEditor.FIELDS) {
-      const row = document.createElement("div");
-      row.className = "row";
-
-      const label = document.createElement("label");
-      label.textContent = field.label;
-      row.appendChild(label);
-
-      const picker = document.createElement("ha-entity-picker");
-      picker.allowCustomEntity = true;
-      picker.includeDomains = [field.domain];
-      if (this._hass) picker.hass = this._hass;
-      picker.value = this._config[field.key] || "";
-
-      picker.addEventListener("value-changed", (ev) => {
-        const val = ev.detail?.value ?? "";
-        if (this._config[field.key] === val) return;
-        this._config = { ...this._config, [field.key]: val };
-        this._fireChanged();
+    if (!this._form) {
+      this.innerHTML = "";
+      this._form = document.createElement("ha-form");
+      this._form.schema = EDITOR_SCHEMA;
+      this._form.computeLabel = (schema) => {
+        const labels = {
+          entity: "Vacuum Entity",
+          camera_entity: "Camera Entity (Map)",
+          battery_entity: "Battery Sensor",
+          mode_entity: "Clean Mode Select",
+        };
+        return labels[schema.name] || schema.name;
+      };
+      this._form.addEventListener("value-changed", (ev) => {
+        const newConfig = ev.detail?.value;
+        if (!newConfig) return;
+        const clean = { ...newConfig };
+        for (const key of ["camera_entity", "battery_entity", "mode_entity"]) {
+          if (!clean[key]) delete clean[key];
+        }
+        this._config = clean;
+        this.dispatchEvent(new CustomEvent("config-changed", {
+          detail: { config: clean },
+          bubbles: true,
+          composed: true,
+        }));
       });
-
-      row.appendChild(picker);
-      this._pickers[field.key] = picker;
-
-      if (!field.required) {
-        const hint = document.createElement("div");
-        hint.className = "hint";
-        hint.textContent = "Leave empty to auto-detect";
-        row.appendChild(hint);
-      }
-
-      container.appendChild(row);
+      this.appendChild(this._form);
     }
-  }
 
-  _updatePickers() {
-    if (!this._pickers) return;
-    for (const field of NarwalVacuumCardEditor.FIELDS) {
-      const picker = this._pickers[field.key];
-      if (!picker) continue;
-      if (this._hass) picker.hass = this._hass;
-      const desired = this._config[field.key] || "";
-      if (picker.value !== desired) picker.value = desired;
-    }
-  }
-
-  _fireChanged() {
-    const clean = { ...this._config };
-    for (const key of ["camera_entity", "battery_entity", "mode_entity"]) {
-      if (!clean[key]) delete clean[key];
-    }
-    this.dispatchEvent(new CustomEvent("config-changed", {
-      detail: { config: clean },
-      bubbles: true,
-      composed: true,
-    }));
+    this._form.hass = this._hass;
+    this._form.data = this._config;
   }
 }
 

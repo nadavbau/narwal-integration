@@ -28,6 +28,7 @@ from .narwal_client import (
     NarwalClient,
     NarwalCloud,
     NarwalCloudError,
+    NarwalCommandError,
     NarwalConnectionError,
     NarwalState,
 )
@@ -35,6 +36,7 @@ from .narwal_client import (
 _LOGGER = logging.getLogger(__name__)
 
 POLL_INTERVAL = timedelta(seconds=60)
+MAX_CONSECUTIVE_FAILURES = 3
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -52,6 +54,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.config_entry = entry
         self._cloud: NarwalCloud | None = None
         self.selected_clean_mode: CleanMode = CleanMode.VACUUM_AND_MOP
+        self._consecutive_failures: int = 0
 
         if CONF_ACCESS_TOKEN in entry.data:
             self._setup_from_cloud_config(entry)
@@ -113,6 +116,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             state.working_status.name,
             state.is_docked,
         )
+        self._consecutive_failures = 0
         self.async_set_updated_data(state)
 
     async def _reauth(self) -> None:
@@ -120,7 +124,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if not self._cloud:
             return
 
-        # Try token refresh first
         try:
             session = await self.hass.async_add_executor_job(
                 self._cloud.refresh_token
@@ -131,7 +134,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except NarwalCloudError as err:
             _LOGGER.info("Token refresh failed (%s), attempting full re-login", err)
 
-        # Fall back to email/password login
         email = self.config_entry.data.get(CONF_EMAIL)
         password = self.config_entry.data.get(CONF_PASSWORD)
         if not email or not password:
@@ -157,21 +159,54 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.client._mqtt_password = access_token
         _LOGGER.info("Narwal access token updated")
 
+    async def _reconnect_with_fresh_token(self) -> None:
+        """Full reconnect cycle: refresh token, disconnect, reconnect."""
+        _LOGGER.warning(
+            "Forcing token refresh + reconnect after %d consecutive failures",
+            self._consecutive_failures,
+        )
+        try:
+            await self._reauth()
+            if self.client.connected:
+                await self.client.disconnect()
+            await self.client.connect()
+            self.client.on_state_update = self._on_state_update
+            self._consecutive_failures = 0
+            _LOGGER.warning("Reconnected successfully with fresh token")
+        except Exception:
+            _LOGGER.error("Reconnect failed", exc_info=True)
+
     def _on_state_update(self, state: NarwalState) -> None:
         """Handle state updates from MQTT."""
+        self._consecutive_failures = 0
         self.async_set_updated_data(state)
 
     async def _async_update_data(self) -> NarwalState:
         """Poll for status (backup for push updates)."""
+        needs_reconnect = False
+
         if self._cloud and self._cloud.session.is_token_expired:
-            await self._reauth()
-            if self.client.connected:
-                await self.client.disconnect()
-                await self.client.connect()
-                self.client.on_state_update = self._on_state_update
+            needs_reconnect = True
+        elif self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES and self._cloud:
+            needs_reconnect = True
+
+        if needs_reconnect:
+            await self._reconnect_with_fresh_token()
 
         if self.client.connected:
-            await self.client.request_status_update()
+            try:
+                await self.client.request_status_update()
+                self._consecutive_failures = 0
+            except NarwalCommandError:
+                self._consecutive_failures += 1
+                _LOGGER.warning(
+                    "Status poll failed (%d/%d before reconnect)",
+                    self._consecutive_failures, MAX_CONSECUTIVE_FAILURES,
+                )
+        else:
+            self._consecutive_failures += 1
+            _LOGGER.warning("MQTT not connected, failure count: %d", self._consecutive_failures)
+
         return self.client.state
 
     async def async_shutdown(self) -> None:
