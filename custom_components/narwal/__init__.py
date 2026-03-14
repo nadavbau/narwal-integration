@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TypeAlias
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import PLATFORMS
+from .const import DOMAIN, PLATFORMS
 from .coordinator import NarwalCoordinator
 from .narwal_client import NarwalConnectionError
 
@@ -17,9 +19,14 @@ _LOGGER = logging.getLogger(__name__)
 
 NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]
 
+CARD_JS_URL = f"/{DOMAIN}/narwal-vacuum-card.js"
+CARD_JS_PATH = Path(__file__).parent / "frontend" / "narwal-vacuum-card.js"
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bool:
     """Set up Narwal from a config entry."""
+    _register_card(hass)
+
     coordinator = NarwalCoordinator(hass, entry)
     try:
         await coordinator.async_setup()
@@ -29,6 +36,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+def _register_card(hass: HomeAssistant) -> None:
+    """Register the Narwal vacuum Lovelace card (once per HA session)."""
+    if DOMAIN in hass.data.get("narwal_card_registered", set()):
+        return
+    hass.http.register_static_path(CARD_JS_URL, str(CARD_JS_PATH), cache_headers=False)
+    add_extra_js_url(hass, CARD_JS_URL)
+    hass.data.setdefault("narwal_card_registered", set()).add(DOMAIN)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bool:
