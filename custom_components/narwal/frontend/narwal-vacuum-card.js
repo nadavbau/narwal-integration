@@ -14,90 +14,94 @@ const MODES = [
 class NarwalVacuumCardEditor extends HTMLElement {
   _config = {};
   _hass = null;
+  _rendered = false;
+
+  static get FIELDS() {
+    return [
+      { key: "entity",         label: "Vacuum Entity *",    domain: "vacuum",  required: true },
+      { key: "camera_entity",  label: "Camera Entity (Map)", domain: "camera" },
+      { key: "battery_entity", label: "Battery Sensor",      domain: "sensor" },
+      { key: "mode_entity",    label: "Clean Mode Select",   domain: "select" },
+    ];
+  }
 
   set hass(hass) {
     this._hass = hass;
-    this._render();
+    if (!this._rendered) {
+      this._buildEditor();
+      this._rendered = true;
+    }
+    this._updatePickers();
   }
 
   setConfig(config) {
     this._config = { ...config };
-    this._render();
+    if (this._rendered) this._updatePickers();
   }
 
-  _render() {
-    if (!this._hass) return;
+  _buildEditor() {
+    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+    this.shadowRoot.innerHTML = "";
 
-    if (!this.shadowRoot) {
-      this.attachShadow({ mode: "open" });
-    }
-    this.shadowRoot.innerHTML = `
-      <style>
-        .editor { padding: 8px 0; }
-        .row { margin-bottom: 16px; }
-        .row label { display: block; font-size: 0.85em; font-weight: 500;
-          margin-bottom: 4px; color: var(--primary-text-color); }
-        .row .hint { font-size: 0.75em; color: var(--secondary-text-color);
-          margin-top: 2px; }
-        ha-entity-picker { display: block; width: 100%; }
-      </style>
-      <div class="editor">
-        <div class="row">
-          <label>Vacuum Entity *</label>
-          <ha-entity-picker
-            id="entity"
-            .hass=${this._hass}
-            .value=${this._config.entity || ""}
-            .includeDomains=${["vacuum"]}
-            allow-custom-entity
-          ></ha-entity-picker>
-        </div>
-        <div class="row">
-          <label>Camera Entity (Map)</label>
-          <ha-entity-picker
-            id="camera_entity"
-            .hass=${this._hass}
-            .value=${this._config.camera_entity || ""}
-            .includeDomains=${["camera"]}
-            allow-custom-entity
-          ></ha-entity-picker>
-          <div class="hint">Leave empty to auto-detect</div>
-        </div>
-        <div class="row">
-          <label>Battery Sensor</label>
-          <ha-entity-picker
-            id="battery_entity"
-            .hass=${this._hass}
-            .value=${this._config.battery_entity || ""}
-            .includeDomains=${["sensor"]}
-            allow-custom-entity
-          ></ha-entity-picker>
-          <div class="hint">Leave empty to auto-detect</div>
-        </div>
-        <div class="row">
-          <label>Clean Mode Select</label>
-          <ha-entity-picker
-            id="mode_entity"
-            .hass=${this._hass}
-            .value=${this._config.mode_entity || ""}
-            .includeDomains=${["select"]}
-            allow-custom-entity
-          ></ha-entity-picker>
-          <div class="hint">Leave empty to auto-detect</div>
-        </div>
-      </div>
+    const style = document.createElement("style");
+    style.textContent = `
+      .editor { padding: 8px 0; }
+      .row { margin-bottom: 16px; }
+      .row label { display: block; font-size: 0.85em; font-weight: 500;
+        margin-bottom: 4px; color: var(--primary-text-color); }
+      .hint { font-size: 0.75em; color: var(--secondary-text-color); margin-top: 2px; }
     `;
+    this.shadowRoot.appendChild(style);
 
-    for (const field of ["entity", "camera_entity", "battery_entity", "mode_entity"]) {
-      const el = this.shadowRoot.getElementById(field);
-      if (el) {
-        el.addEventListener("value-changed", (ev) => {
-          const val = ev.detail?.value ?? "";
-          if (this._config[field] === val) return;
-          this._config = { ...this._config, [field]: val };
-          this._fireChanged();
-        });
+    const container = document.createElement("div");
+    container.className = "editor";
+    this.shadowRoot.appendChild(container);
+
+    this._pickers = {};
+
+    for (const field of NarwalVacuumCardEditor.FIELDS) {
+      const row = document.createElement("div");
+      row.className = "row";
+
+      const label = document.createElement("label");
+      label.textContent = field.label;
+      row.appendChild(label);
+
+      const picker = document.createElement("ha-entity-picker");
+      picker.allowCustomEntity = true;
+      picker.includeDomains = [field.domain];
+      if (this._hass) picker.hass = this._hass;
+      picker.value = this._config[field.key] || "";
+
+      picker.addEventListener("value-changed", (ev) => {
+        const val = ev.detail?.value ?? "";
+        if (this._config[field.key] === val) return;
+        this._config = { ...this._config, [field.key]: val };
+        this._fireChanged();
+      });
+
+      row.appendChild(picker);
+      this._pickers[field.key] = picker;
+
+      if (!field.required) {
+        const hint = document.createElement("div");
+        hint.className = "hint";
+        hint.textContent = "Leave empty to auto-detect";
+        row.appendChild(hint);
       }
+
+      container.appendChild(row);
+    }
+  }
+
+  _updatePickers() {
+    if (!this._pickers) return;
+    for (const field of NarwalVacuumCardEditor.FIELDS) {
+      const picker = this._pickers[field.key];
+      if (!picker) continue;
+      if (this._hass) picker.hass = this._hass;
+      const desired = this._config[field.key] || "";
+      if (picker.value !== desired) picker.value = desired;
     }
   }
 
