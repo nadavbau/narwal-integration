@@ -1,4 +1,4 @@
-const CARD_VERSION = "1.1.0";
+const CARD_VERSION = "1.2.0";
 
 const MODES = [
   { label: "Vacuum & Mop", icon: "mdi:robot-vacuum", value: "Vacuum & Mop" },
@@ -7,19 +7,135 @@ const MODES = [
   { label: "Mop", icon: "mdi:spray-bottle", value: "Mop Only" },
 ];
 
-/**
- * Configuration options:
- *   entity:          (required) vacuum entity ID
- *   camera_entity:   (optional) camera entity ID for map — auto-detected if omitted
- *   battery_entity:  (optional) battery sensor entity ID — auto-detected if omitted
- *   mode_entity:     (optional) clean mode select entity ID — auto-detected if omitted
- */
+/* ================================================================
+ *  Visual Config Editor
+ * ================================================================ */
+
+class NarwalVacuumCardEditor extends HTMLElement {
+  _config = {};
+  _hass = null;
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  setConfig(config) {
+    this._config = { ...config };
+    this._render();
+  }
+
+  _render() {
+    if (!this._hass) return;
+
+    if (!this.shadowRoot) {
+      this.attachShadow({ mode: "open" });
+    }
+    this.shadowRoot.innerHTML = `
+      <style>
+        .editor { padding: 8px 0; }
+        .row { margin-bottom: 16px; }
+        .row label { display: block; font-size: 0.85em; font-weight: 500;
+          margin-bottom: 4px; color: var(--primary-text-color); }
+        .row .hint { font-size: 0.75em; color: var(--secondary-text-color);
+          margin-top: 2px; }
+        ha-entity-picker { display: block; width: 100%; }
+      </style>
+      <div class="editor">
+        <div class="row">
+          <label>Vacuum Entity *</label>
+          <ha-entity-picker
+            id="entity"
+            .hass=${this._hass}
+            .value=${this._config.entity || ""}
+            .includeDomains=${["vacuum"]}
+            allow-custom-entity
+          ></ha-entity-picker>
+        </div>
+        <div class="row">
+          <label>Camera Entity (Map)</label>
+          <ha-entity-picker
+            id="camera_entity"
+            .hass=${this._hass}
+            .value=${this._config.camera_entity || ""}
+            .includeDomains=${["camera"]}
+            allow-custom-entity
+          ></ha-entity-picker>
+          <div class="hint">Leave empty to auto-detect</div>
+        </div>
+        <div class="row">
+          <label>Battery Sensor</label>
+          <ha-entity-picker
+            id="battery_entity"
+            .hass=${this._hass}
+            .value=${this._config.battery_entity || ""}
+            .includeDomains=${["sensor"]}
+            allow-custom-entity
+          ></ha-entity-picker>
+          <div class="hint">Leave empty to auto-detect</div>
+        </div>
+        <div class="row">
+          <label>Clean Mode Select</label>
+          <ha-entity-picker
+            id="mode_entity"
+            .hass=${this._hass}
+            .value=${this._config.mode_entity || ""}
+            .includeDomains=${["select"]}
+            allow-custom-entity
+          ></ha-entity-picker>
+          <div class="hint">Leave empty to auto-detect</div>
+        </div>
+      </div>
+    `;
+
+    for (const field of ["entity", "camera_entity", "battery_entity", "mode_entity"]) {
+      const el = this.shadowRoot.getElementById(field);
+      if (el) {
+        el.addEventListener("value-changed", (ev) => {
+          const val = ev.detail?.value ?? "";
+          if (this._config[field] === val) return;
+          this._config = { ...this._config, [field]: val };
+          this._fireChanged();
+        });
+      }
+    }
+  }
+
+  _fireChanged() {
+    const clean = { ...this._config };
+    for (const key of ["camera_entity", "battery_entity", "mode_entity"]) {
+      if (!clean[key]) delete clean[key];
+    }
+    this.dispatchEvent(new CustomEvent("config-changed", {
+      detail: { config: clean },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+}
+
+customElements.define("narwal-vacuum-card-editor", NarwalVacuumCardEditor);
+
+/* ================================================================
+ *  Main Card
+ * ================================================================ */
+
 class NarwalVacuumCard extends HTMLElement {
   constructor() {
     super();
     this._selectedRooms = new Set();
     this._selectedMode = "Vacuum & Mop";
     this._initialized = false;
+  }
+
+  static getConfigElement() {
+    return document.createElement("narwal-vacuum-card-editor");
+  }
+
+  static getStubConfig() {
+    return {
+      entity: "vacuum.narwal_vacuum",
+    };
   }
 
   set hass(hass) {
@@ -36,17 +152,8 @@ class NarwalVacuumCard extends HTMLElement {
     this._config = { ...config };
     if (this._initialized) {
       this._initialized = false;
-      this.shadowRoot?.innerHTML && (this.shadowRoot.innerHTML = "");
+      if (this.shadowRoot) this.shadowRoot.innerHTML = "";
     }
-  }
-
-  static getStubConfig() {
-    return {
-      entity: "vacuum.narwal_vacuum",
-      camera_entity: "",
-      battery_entity: "",
-      mode_entity: "",
-    };
   }
 
   getCardSize() {
