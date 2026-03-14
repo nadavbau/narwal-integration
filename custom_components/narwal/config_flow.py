@@ -45,7 +45,7 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         self._email: str = ""
         self._password: str = ""
         self._region: str = "us"
-        self._devices: list[dict[str, str]] = []
+        self._cloud_devices: list[dict[str, str]] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -74,17 +74,17 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 self._cloud = cloud
 
-                # Try to discover devices
+                # Get friendly names from cloud API for display
                 try:
                     devices = await self.hass.async_add_executor_job(
                         cloud.get_devices
                     )
-                    self._devices = [
+                    self._cloud_devices = [
                         {"device_id": d.device_id, "name": d.name}
                         for d in devices
                     ]
                 except Exception:
-                    _LOGGER.debug("Device discovery failed, will ask for manual input")
+                    _LOGGER.debug("Cloud device discovery failed")
 
                 return await self.async_step_device()
 
@@ -122,19 +122,12 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        # Build device selection schema
-        device_id_default = ""
-        if self._devices:
-            device_id_default = self._devices[0]["device_id"]
-
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_PRODUCT_KEY, default="EHf6cRNRGT"
                 ): str,
-                vol.Required(
-                    CONF_DEVICE_NAME, default=device_id_default
-                ): str,
+                vol.Required(CONF_DEVICE_NAME): str,
             }
         )
 
@@ -147,16 +140,20 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             },
         )
 
-    def _find_device_friendly_name(self, device_id: str) -> str:
-        for d in self._devices:
-            if d["device_id"] == device_id:
-                return d["name"]
-        return device_id[:8]
+    def _find_device_friendly_name(self, mqtt_device_name: str) -> str:
+        for d in self._cloud_devices:
+            return d["name"]
+        return mqtt_device_name[:8]
 
     def _format_discovered_devices(self) -> str:
-        if not self._devices:
-            return "No devices discovered automatically."
-        lines = []
-        for d in self._devices:
-            lines.append(f"- **{d['name']}** (`{d['device_id']}`)")
-        return "\n".join(lines)
+        if self._cloud_devices:
+            lines = ["Found devices:"]
+            for d in self._cloud_devices:
+                lines.append(f"- **{d['name']}** (cloud ID: {d['device_id']})")
+            lines.append(
+                "\nNote: The MQTT device name is a 32-character hex string, "
+                "**not** the cloud ID above. Use `test_mqtt.py` or the Narwal "
+                "app's MQTT traffic to find it."
+            )
+            return "\n".join(lines)
+        return "No devices found. Enter the MQTT device name (32-character hex string)."

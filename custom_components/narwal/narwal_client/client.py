@@ -184,7 +184,7 @@ class NarwalClient:
 
         Runs in an executor thread to avoid blocking the event loop.
         """
-        _LOGGER.warning(
+        _LOGGER.info(
             "Connecting to %s:%d as client_id=%s, base_topic=%s",
             self.broker,
             self.port,
@@ -198,7 +198,7 @@ class NarwalClient:
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         )
         self._client.username_pw_set(self._mqtt_username, self._mqtt_password)
-        _LOGGER.warning(
+        _LOGGER.debug(
             "MQTT password (first 20 chars): %s...",
             self._mqtt_password[:20] if self._mqtt_password else "EMPTY",
         )
@@ -218,29 +218,29 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.warning("MQTT connected: %s", reason_code)
+        _LOGGER.info("MQTT connected: %s", reason_code)
         if str(reason_code) == "Success" or reason_code == 0:
             topic = f"{self.base_topic}/#"
             client.subscribe(topic, qos=1)
-            _LOGGER.warning("Subscribed to %s", topic)
+            _LOGGER.debug("Subscribed to %s", topic)
             self._connected.set()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
-        _LOGGER.warning("MQTT SUBACK (mid=%s): %s", mid, reason_codes)
+        _LOGGER.debug("MQTT SUBACK (mid=%s): %s", mid, reason_codes)
         evt = self._pending_subacks.pop(mid, None)
         if evt:
             evt.set()
 
     def _on_log(self, client, userdata, level, buf):
-        """Forward ALL paho-mqtt internal log messages at WARNING level."""
-        _LOGGER.warning("PAHO: %s", buf)
+        """Forward paho-mqtt internal log messages."""
+        _LOGGER.debug("PAHO: %s", buf)
 
     def _on_message(self, client, userdata, msg):
         """Handle all incoming messages: command responses and broadcasts."""
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.warning(
+        _LOGGER.debug(
             "MQTT << %s (%d bytes) pending=%s",
             topic_suffix, len(msg.payload), list(self._pending_responses.keys()),
         )
@@ -263,7 +263,7 @@ class NarwalClient:
             self._notify_state_update()
 
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
-        _LOGGER.warning("MQTT disconnected: %s", reason_code)
+        _LOGGER.info("MQTT disconnected: %s", reason_code)
         self._connected.clear()
 
     def _notify_state_update(self):
@@ -315,7 +315,7 @@ class NarwalClient:
         sub_result = self._client.subscribe(response_topic, qos=1)
         sub_mid = sub_result[1]
         self._pending_subacks[sub_mid] = sub_event
-        _LOGGER.warning("Subscribing to %s (mid=%s), waiting for SUBACK...", response_topic, sub_mid)
+        _LOGGER.debug("Subscribing to %s (mid=%s), waiting for SUBACK...", response_topic, sub_mid)
 
         if not sub_event.wait(timeout=5.0):
             _LOGGER.error("SUBACK timeout for %s (mid=%s)", response_topic, sub_mid)
@@ -323,7 +323,7 @@ class NarwalClient:
         props = self._build_publish_properties(topic, request_id)
         payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Published >> %s (%d bytes) rc=%s mid=%s",
             command, len(payload), result.rc, result.mid,
         )
@@ -449,3 +449,58 @@ class NarwalClient:
         """Stop the paho-mqtt network loop and disconnect (blocking)."""
         client.loop_stop()
         client.disconnect()
+
+    @staticmethod
+    def discover_devices_via_mqtt(
+        product_key: str,
+        user_uuid: str,
+        mqtt_password: str,
+        broker: str,
+        port: int = MQTT_PORT,
+        timeout: float = 10.0,
+    ) -> list[str]:
+        """Connect to MQTT and discover device names by listening for broadcasts.
+
+        Subscribes to /{product_key}/+/# and returns a list of unique
+        device names seen in incoming message topics.  Blocking call.
+        """
+        discovered: list[str] = []
+        found_event = threading.Event()
+
+        client = mqtt.Client(
+            client_id=f"app_{user_uuid}_{uuid.uuid4()}",
+            protocol=mqtt.MQTTv5,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        )
+        client.username_pw_set(user_uuid, mqtt_password)
+        ctx = ssl.create_default_context()
+        client.tls_set_context(ctx)
+
+        def on_connect(cl, ud, flags, rc, props=None):
+            if str(rc) == "Success" or rc == 0:
+                cl.subscribe(f"/{product_key}/+/#", qos=1)
+
+        def on_message(cl, ud, msg):
+            parts = msg.topic.split("/")
+            # Topic format: /{product_key}/{device_name}/...
+            if len(parts) >= 3 and parts[1] == product_key:
+                dev = parts[2]
+                if dev and dev not in discovered:
+                    discovered.append(dev)
+                    _LOGGER.info("Discovered MQTT device: %s", dev)
+                    found_event.set()
+
+        client.on_connect = on_connect
+        client.on_message = on_message
+
+        try:
+            client.connect(broker, port, keepalive=30)
+            client.loop_start()
+            found_event.wait(timeout=timeout)
+        except Exception:
+            _LOGGER.debug("MQTT discovery failed", exc_info=True)
+        finally:
+            client.loop_stop()
+            client.disconnect()
+
+        return discovered

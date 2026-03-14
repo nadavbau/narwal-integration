@@ -87,7 +87,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     async def async_setup(self) -> None:
         """Set up the coordinator -- always refresh token, then connect to MQTT."""
         if self._cloud:
-            _LOGGER.warning(
+            _LOGGER.info(
                 "Token expired=%s, refreshing to ensure valid MQTT credentials",
                 self._cloud.session.is_token_expired,
             )
@@ -117,10 +117,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 self._cloud.refresh_token
             )
             self._apply_new_token(session.access_token, session.refresh_token)
-            _LOGGER.warning("Token refreshed successfully")
+            _LOGGER.info("Token refreshed successfully")
             return
         except NarwalCloudError as err:
-            _LOGGER.warning("Token refresh failed (%s), attempting full re-login", err)
+            _LOGGER.info("Token refresh failed (%s), attempting full re-login", err)
 
         # Fall back to email/password login
         email = self.config_entry.data.get(CONF_EMAIL)
@@ -134,7 +134,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 self._cloud.login, email, password
             )
             self._apply_new_token(session.access_token, session.refresh_token)
-            _LOGGER.warning("Re-login succeeded")
+            _LOGGER.info("Re-login succeeded")
         except NarwalCloudError as err:
             _LOGGER.error("Re-login failed: %s -- MQTT will likely fail", err)
 
