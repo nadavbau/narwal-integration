@@ -102,6 +102,8 @@ class NarwalClient:
         self._connected = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._tls_insecure = False
+        # Response matching: topic -> (Event, payload_holder)
+        self._pending_responses: dict[str, tuple[threading.Event, list[bytes | None]]] = {}
 
     @property
     def base_topic(self) -> str:
@@ -211,39 +213,45 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.info("MQTT connected: %s", reason_code)
+        _LOGGER.warning("MQTT connected: %s", reason_code)
         if str(reason_code) == "Success" or reason_code == 0:
             topic = f"{self.base_topic}/#"
             client.subscribe(topic, qos=1)
-            _LOGGER.debug("Subscribing to %s", topic)
+            _LOGGER.warning("Subscribed to %s", topic)
             self._connected.set()
         else:
-            _LOGGER.error("MQTT connection failed: %s", reason_code)
+            _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
-        _LOGGER.debug("MQTT subscription result (mid=%s): %s", mid, reason_codes)
+        _LOGGER.warning("MQTT SUBACK (mid=%s): %s", mid, reason_codes)
 
     def _on_message(self, client, userdata, msg):
-        """Handle incoming messages not matched by message_callback_add (broadcasts)."""
+        """Handle all incoming messages: command responses and broadcasts."""
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.debug("MQTT << broadcast %s (%d bytes)", topic_suffix, len(msg.payload))
+        _LOGGER.warning(
+            "MQTT << %s (%d bytes) pending=%s",
+            topic_suffix, len(msg.payload), list(self._pending_responses.keys()),
+        )
 
+        # Check for pending command response
+        if msg.topic in self._pending_responses:
+            event, holder = self._pending_responses.pop(msg.topic)
+            holder[0] = msg.payload
+            event.set()
+            return
+
+        # Handle status broadcasts
         payload = self._extract_app_payload(msg.payload)
 
         if topic_suffix == "status/robot_base_status":
             self.state.update_base_status(payload)
-            _LOGGER.debug(
-                "State after broadcast: battery=%.1f%%, status=%s",
-                self.state.battery_level,
-                self.state.working_status.name,
-            )
             self._notify_state_update()
         elif topic_suffix == "status/working_status":
             self.state.update_working_status(payload)
             self._notify_state_update()
 
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
-        _LOGGER.info("MQTT disconnected: %s", reason_code)
+        _LOGGER.warning("MQTT disconnected: %s", reason_code)
         self._connected.clear()
 
     def _notify_state_update(self):
@@ -286,32 +294,27 @@ class NarwalClient:
 
         response_event = threading.Event()
         response_holder: list[bytes | None] = [None]
+        self._pending_responses[response_topic] = (response_event, response_holder)
 
-        def _on_response(_client, _userdata, msg):
-            _LOGGER.debug("MQTT << response for %s (%d bytes)", command, len(msg.payload))
-            response_holder[0] = msg.payload
-            response_event.set()
-
-        self._client.message_callback_add(response_topic, _on_response)
+        # Narwal's broker requires an explicit subscription to the response
+        # topic; the wildcard (/.../#) alone doesn't route responses.
         self._client.subscribe(response_topic, qos=1)
 
         props = self._build_publish_properties(topic, request_id)
         payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.debug(
+        _LOGGER.warning(
             "Published >> %s (%d bytes) rc=%s mid=%s",
             command, len(payload), result.rc, result.mid,
         )
 
-        try:
-            if not response_event.wait(timeout=timeout):
-                _LOGGER.error("Command timeout: %s (%.0fs)", command, timeout)
-                raise NarwalCommandError(f"Command {command} timed out")
+        if not response_event.wait(timeout=timeout):
+            self._pending_responses.pop(response_topic, None)
+            _LOGGER.error("Command timeout: %s (%.0fs)", command, timeout)
+            raise NarwalCommandError(f"Command {command} timed out")
 
-            app_payload = self._extract_app_payload(response_holder[0])
-            return CommandResponse.from_payload(app_payload)
-        finally:
-            self._client.message_callback_remove(response_topic)
+        app_payload = self._extract_app_payload(response_holder[0])
+        return CommandResponse.from_payload(app_payload)
 
     async def send_command_no_response(self, command: str, extra_payload: bytes = b"") -> None:
         """Send a command without waiting for a response."""
