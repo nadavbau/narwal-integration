@@ -183,7 +183,7 @@ class NarwalClient:
 
         Runs in an executor thread to avoid blocking the event loop.
         """
-        _LOGGER.info(
+        _LOGGER.warning(
             "Connecting to %s:%d as client_id=%s, base_topic=%s",
             self.broker,
             self.port,
@@ -197,7 +197,12 @@ class NarwalClient:
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         )
         self._client.enable_logger(_PAHO_LOGGER)
+        _PAHO_LOGGER.setLevel(logging.WARNING)
         self._client.username_pw_set(self._mqtt_username, self._mqtt_password)
+        _LOGGER.warning(
+            "MQTT password (first 20 chars): %s...",
+            self._mqtt_password[:20] if self._mqtt_password else "EMPTY",
+        )
 
         ctx = ssl.create_default_context()
         self._client.tls_set_context(ctx)
