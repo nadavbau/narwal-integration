@@ -218,11 +218,14 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.info("MQTT connected: %s", reason_code)
+        _LOGGER.warning(
+            "MQTT connected: %s | base_topic=%s | device_name=%s",
+            reason_code, self.base_topic, self.device_name,
+        )
         if str(reason_code) == "Success" or reason_code == 0:
             topic = f"{self.base_topic}/#"
             client.subscribe(topic, qos=1)
-            _LOGGER.debug("Subscribed to %s", topic)
+            _LOGGER.warning("Subscribed to %s", topic)
             self._connected.set()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
@@ -240,9 +243,10 @@ class NarwalClient:
     def _on_message(self, client, userdata, msg):
         """Handle all incoming messages: command responses and broadcasts."""
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.debug(
-            "MQTT << %s (%d bytes) pending=%s",
-            topic_suffix, len(msg.payload), list(self._pending_responses.keys()),
+        _LOGGER.warning(
+            "MQTT << %s (%d bytes) full_topic=%s pending=%s",
+            topic_suffix, len(msg.payload), msg.topic,
+            list(self._pending_responses.keys()),
         )
 
         # Check for pending command response
@@ -323,9 +327,9 @@ class NarwalClient:
         props = self._build_publish_properties(topic, request_id)
         payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.debug(
-            "Published >> %s (%d bytes) rc=%s mid=%s",
-            command, len(payload), result.rc, result.mid,
+        _LOGGER.warning(
+            "Published >> %s | full_topic=%s | response_topic=%s | rc=%s mid=%s",
+            command, topic, response_topic, result.rc, result.mid,
         )
 
         if not response_event.wait(timeout=timeout):

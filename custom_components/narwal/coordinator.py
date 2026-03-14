@@ -86,6 +86,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def async_setup(self) -> None:
         """Set up the coordinator -- always refresh token, then connect to MQTT."""
+        _LOGGER.warning(
+            "Setting up Narwal: device_name=%s, product_key=%s, broker=%s",
+            self.client.device_name,
+            self.client.product_key,
+            self.client.broker,
+        )
         if self._cloud:
             _LOGGER.info(
                 "Token expired=%s, refreshing to ensure valid MQTT credentials",
