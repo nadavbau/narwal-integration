@@ -40,11 +40,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
 
 def _register_card(hass: HomeAssistant) -> None:
     """Register the Narwal vacuum Lovelace card (once per HA session)."""
-    if DOMAIN in hass.data.get("narwal_card_registered", set()):
+    if hass.data.get("narwal_card_registered"):
         return
-    hass.http.register_static_path(CARD_JS_URL, str(CARD_JS_PATH), cache_headers=False)
-    add_extra_js_url(hass, CARD_JS_URL)
-    hass.data.setdefault("narwal_card_registered", set()).add(DOMAIN)
+    js_path = str(CARD_JS_PATH)
+    if not CARD_JS_PATH.is_file():
+        _LOGGER.warning("Card JS not found at %s — skipping card registration", js_path)
+        return
+    try:
+        hass.http.register_static_path(CARD_JS_URL, js_path)
+        add_extra_js_url(hass, CARD_JS_URL)
+        hass.data["narwal_card_registered"] = True
+    except Exception:
+        _LOGGER.warning("Failed to register Narwal card frontend", exc_info=True)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bool:
