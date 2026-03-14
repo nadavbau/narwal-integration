@@ -40,7 +40,6 @@ from .const import (
 from .models import CommandResponse, NarwalState
 
 _LOGGER = logging.getLogger(__name__)
-_PAHO_LOGGER = logging.getLogger(f"{__name__}.paho")
 
 
 class NarwalConnectionError(Exception):
@@ -104,6 +103,8 @@ class NarwalClient:
         self._tls_insecure = False
         # Response matching: topic -> (Event, payload_holder)
         self._pending_responses: dict[str, tuple[threading.Event, list[bytes | None]]] = {}
+        # SUBACK tracking: mid -> Event
+        self._pending_subacks: dict[int, threading.Event] = {}
 
     @property
     def base_topic(self) -> str:
@@ -196,8 +197,6 @@ class NarwalClient:
             protocol=mqtt.MQTTv5,
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         )
-        self._client.enable_logger(_PAHO_LOGGER)
-        _PAHO_LOGGER.setLevel(logging.WARNING)
         self._client.username_pw_set(self._mqtt_username, self._mqtt_password)
         _LOGGER.warning(
             "MQTT password (first 20 chars): %s...",
@@ -213,6 +212,7 @@ class NarwalClient:
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect
         self._client.on_subscribe = self._on_subscribe
+        self._client.on_log = self._on_log
 
         self._client.connect(self.broker, self.port, keepalive=30)
         self._client.loop_start()
@@ -229,6 +229,13 @@ class NarwalClient:
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
         _LOGGER.warning("MQTT SUBACK (mid=%s): %s", mid, reason_codes)
+        evt = self._pending_subacks.pop(mid, None)
+        if evt:
+            evt.set()
+
+    def _on_log(self, client, userdata, level, buf):
+        """Forward ALL paho-mqtt internal log messages at WARNING level."""
+        _LOGGER.warning("PAHO: %s", buf)
 
     def _on_message(self, client, userdata, msg):
         """Handle all incoming messages: command responses and broadcasts."""
@@ -303,7 +310,15 @@ class NarwalClient:
 
         # Narwal's broker requires an explicit subscription to the response
         # topic; the wildcard (/.../#) alone doesn't route responses.
-        self._client.subscribe(response_topic, qos=1)
+        # We MUST wait for the SUBACK before publishing to avoid a race.
+        sub_event = threading.Event()
+        sub_result = self._client.subscribe(response_topic, qos=1)
+        sub_mid = sub_result[1]
+        self._pending_subacks[sub_mid] = sub_event
+        _LOGGER.warning("Subscribing to %s (mid=%s), waiting for SUBACK...", response_topic, sub_mid)
+
+        if not sub_event.wait(timeout=5.0):
+            _LOGGER.error("SUBACK timeout for %s (mid=%s)", response_topic, sub_mid)
 
         props = self._build_publish_properties(topic, request_id)
         payload = self._build_user_payload() + extra_payload
