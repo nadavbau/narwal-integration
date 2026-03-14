@@ -132,7 +132,8 @@ class RoomInfo:
 
     @property
     def display_name(self) -> str:
-        return self.name or ROOM_NAME_CODES.get(self.name_code, f"Room {self.room_id}")
+        base = self.name or ROOM_NAME_CODES.get(self.name_code, f"Room {self.room_id}")
+        return f"{base} ({self.room_id})"
 
 
 def _parse_room_entries(data: bytes) -> list[RoomInfo]:
