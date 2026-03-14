@@ -82,7 +82,50 @@ class MopHumidity(IntEnum):
     WET = 2
 
 
+class CleanMode(IntEnum):
+    VACUUM_AND_MOP = 1
+    VACUUM_THEN_MOP = 2
+    VACUUM_ONLY = 3
+    MOP_ONLY = 4
+
+
 class CommandResult(IntEnum):
     SUCCESS = 1
     NOT_APPLICABLE = 2
     CONFLICT = 3
+
+
+ROOM_NAME_CODES: dict[int, str] = {
+    1: "Default Room",
+    2: "Living Room",
+    3: "Bedroom",
+    4: "Kitchen",
+    5: "Bathroom",
+    6: "Dining Room",
+    7: "Study",
+    8: "Hallway",
+    9: "Balcony",
+    10: "Laundry",
+    11: "Storage",
+    12: "Guest Room",
+    13: "Kids Room",
+    14: "Entrance",
+    15: "Master Bedroom",
+    16: "Second Bedroom",
+    17: "Third Bedroom",
+    18: "Walk-in Closet",
+    19: "Cloakroom",
+    20: "Gym",
+    21: "Office",
+    22: "Nursery",
+    23: "Toilet",
+    24: "Loft",
+    25: "Staircase",
+    26: "Corridor",
+    27: "Garage",
+    28: "Porch",
+    29: "Utility Room",
+    30: "Pantry",
+    31: "Other",
+    76: "Custom Room",
+}

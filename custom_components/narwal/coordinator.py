@@ -102,6 +102,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         await self.client.connect()
         self.client.on_state_update = self._on_state_update
         await self.client.request_status_update()
+        await self.client.fetch_rooms()
 
         state = self.client.state
         _LOGGER.info(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import struct
 from dataclasses import dataclass, field
-from .const import WorkingStatus
+from .const import ROOM_NAME_CODES, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +100,17 @@ class NarwalState:
         if self.working_status in (WorkingStatus.DOCKED, WorkingStatus.CHARGED):
             self.is_docked = True
 
+    rooms: list[RoomInfo] = field(default_factory=list)
+
+    def update_rooms_from_map(self, map_data: bytes) -> None:
+        """Extract room list from map protobuf (field 32 of map response data)."""
+        fields = parse_protobuf_fields(map_data)
+        raw_rooms = fields.get(32)
+        if not isinstance(raw_rooms, bytes):
+            return
+        self.rooms = _parse_room_entries(raw_rooms)
+        _LOGGER.debug("Parsed %d rooms from map data", len(self.rooms))
+
     def update_working_status(self, payload: bytes) -> None:
         """Update from working_status protobuf."""
         fields = parse_protobuf_fields(payload)
@@ -109,6 +120,54 @@ class NarwalState:
             self.elapsed_time = fields[3]
         if 13 in fields:
             self.cleaned_area = fields[13]
+
+
+@dataclass
+class RoomInfo:
+    """A room discovered from the vacuum's map."""
+
+    room_id: int
+    name_code: int
+    name: str
+
+    @property
+    def display_name(self) -> str:
+        return self.name or ROOM_NAME_CODES.get(self.name_code, f"Room {self.room_id}")
+
+
+def _parse_room_entries(data: bytes) -> list[RoomInfo]:
+    """Parse repeated room sub-messages from map field 32."""
+    rooms: list[RoomInfo] = []
+    idx = 0
+    while idx < len(data):
+        tag = data[idx]
+        wire_type = tag & 0x07
+        if wire_type != 2:
+            break
+        idx += 1
+        length = 0
+        shift = 0
+        while idx < len(data):
+            b = data[idx]
+            length |= (b & 0x7F) << shift
+            shift += 7
+            idx += 1
+            if b & 0x80 == 0:
+                break
+        if idx + length > len(data):
+            break
+        room_bytes = data[idx : idx + length]
+        idx += length
+
+        rf = parse_protobuf_fields(room_bytes)
+        room_id = rf.get(1)
+        name_code = rf.get(2, 0)
+        custom_name = rf.get(5, "")
+        if not isinstance(room_id, int):
+            continue
+        name = custom_name if isinstance(custom_name, str) and custom_name else ""
+        rooms.append(RoomInfo(room_id=room_id, name_code=name_code, name=name))
+    return rooms
 
 
 def parse_protobuf_fields(data: bytes) -> dict:

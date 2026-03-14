@@ -14,10 +14,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
-from .const import DOMAIN, FAN_SPEED_LIST, FAN_SPEED_MAP
+from .const import CLEAN_MODE_MAP, DOMAIN, FAN_SPEED_LIST, FAN_SPEED_MAP
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import NarwalCommandError, WorkingStatus
+from .narwal_client import CleanMode, NarwalCommandError, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         | VacuumEntityFeature.RETURN_HOME
         | VacuumEntityFeature.FAN_SPEED
         | VacuumEntityFeature.LOCATE
+        | VacuumEntityFeature.SEND_COMMAND
     )
     _attr_fan_speed_list = FAN_SPEED_LIST
 
@@ -84,12 +85,32 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
     def fan_speed(self) -> str | None:
         return self._last_fan_speed
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        state = self.coordinator.data
+        attrs: dict[str, Any] = {}
+        if state and state.rooms:
+            attrs["rooms"] = {
+                r.room_id: r.display_name for r in state.rooms
+            }
+        return attrs
+
+    def _get_clean_mode(self) -> CleanMode | None:
+        """Read the currently selected clean mode from the select entity."""
+        for entity in self.hass.data.get(DOMAIN, {}).values():
+            if hasattr(entity, "clean_mode_value"):
+                val = entity.clean_mode_value
+                if val is not None:
+                    return CleanMode(val)
+        return None
+
     async def async_start(self) -> None:
         state = self.coordinator.data
         if state and state.is_paused and state.is_cleaning:
             await self.coordinator.client.resume()
         else:
-            resp = await self.coordinator.client.start_plan()
+            mode = self._get_clean_mode()
+            resp = await self.coordinator.client.start_plan(mode=mode)
             if not resp.success:
                 _LOGGER.warning("Start command did not succeed (code=%s)", resp.result_code)
 
@@ -114,3 +135,43 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             await self.coordinator.client.set_fan_speed(FanLevel(level))
             self._last_fan_speed = fan_speed
             self.async_write_ha_state()
+
+    async def async_send_command(
+        self, command: str, params: dict[str, Any] | list[Any] | None = None, **kwargs: Any,
+    ) -> None:
+        """Handle vacuum.send_command for room-specific cleaning.
+
+        Usage:
+          service: vacuum.send_command
+          data:
+            entity_id: vacuum.narwal_...
+            command: clean_rooms
+            params:
+              rooms: [1, 2, 5]
+              mode: "Vacuum & Mop"   # optional
+        """
+        if command == "clean_rooms":
+            p = params if isinstance(params, dict) else {}
+            room_ids = p.get("rooms", [])
+            mode_name = p.get("mode")
+
+            mode: CleanMode | None = None
+            if mode_name and mode_name in CLEAN_MODE_MAP:
+                mode = CleanMode(CLEAN_MODE_MAP[mode_name])
+            elif mode_name is None:
+                mode = self._get_clean_mode()
+
+            if not room_ids:
+                _LOGGER.warning("clean_rooms called without room IDs")
+                return
+
+            _LOGGER.info("Starting room clean: rooms=%s mode=%s", room_ids, mode)
+            resp = await self.coordinator.client.start_plan(
+                mode=mode, room_ids=room_ids
+            )
+            if not resp.success:
+                _LOGGER.warning(
+                    "Room clean did not succeed (code=%s)", resp.result_code
+                )
+        else:
+            _LOGGER.warning("Unknown send_command: %s", command)

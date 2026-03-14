@@ -34,6 +34,7 @@ from .const import (
     TOPIC_CMD_START_CLEAN,
     TOPIC_CMD_START_PLAN,
     TOPIC_CMD_YELL,
+    CleanMode,
     FanLevel,
     MopHumidity,
 )
@@ -114,11 +115,16 @@ class NarwalClient:
     def connected(self) -> bool:
         return self._connected.is_set()
 
-    def _build_user_payload(self) -> bytes:
-        """Build the user auth protobuf wrapped in Narwal frame (0x01 + length + protobuf)."""
+    def _build_user_payload(self, extra_inner: bytes = b"") -> bytes:
+        """Build the user auth protobuf wrapped in Narwal frame (0x01 + length + protobuf).
+
+        extra_inner is appended INSIDE the 0x01 frame (after the user UUID fields)
+        so the vacuum parses them as part of the same message.
+        """
         inner = b""
         inner += _make_protobuf_string(1, self.user_uuid)
         inner += _make_protobuf_string(2, self.user_uuid)
+        inner += extra_inner
         return b'\x01' + _encode_varint(len(inner)) + inner
 
     def _build_publish_properties(self, topic: str, request_id: str) -> Properties:
@@ -285,6 +291,7 @@ class NarwalClient:
         command: str,
         extra_payload: bytes = b"",
         timeout: float = COMMAND_RESPONSE_TIMEOUT,
+        payload_override: bytes | None = None,
     ) -> CommandResponse:
         """Send a command and wait for response.
 
@@ -297,11 +304,12 @@ class NarwalClient:
 
         loop = self._loop or asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, self._send_command_blocking, command, extra_payload, timeout
+            None, self._send_command_blocking, command, extra_payload, timeout, payload_override
         )
 
     def _send_command_blocking(
-        self, command: str, extra_payload: bytes, timeout: float
+        self, command: str, extra_payload: bytes, timeout: float,
+        payload_override: bytes | None = None,
     ) -> CommandResponse:
         """Publish a command and block until the response arrives (runs in executor)."""
         topic = f"{self.base_topic}/{command}"
@@ -325,7 +333,10 @@ class NarwalClient:
             _LOGGER.error("SUBACK timeout for %s (mid=%s)", response_topic, sub_mid)
 
         props = self._build_publish_properties(topic, request_id)
-        payload = self._build_user_payload() + extra_payload
+        if payload_override is not None:
+            payload = payload_override
+        else:
+            payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
         _LOGGER.warning(
             "Published >> %s | full_topic=%s | response_topic=%s | rc=%s mid=%s",
@@ -367,7 +378,28 @@ class NarwalClient:
     async def start(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_START_CLEAN)
 
-    async def start_plan(self) -> CommandResponse:
+    async def start_plan(
+        self,
+        mode: CleanMode | None = None,
+        room_ids: list[int] | None = None,
+    ) -> CommandResponse:
+        """Start a cleaning plan.
+
+        Args:
+            mode: Cleaning mode (vacuum+mop, vacuum only, etc.).
+                  None uses the vacuum's current default.
+            room_ids: List of room IDs to clean.  None cleans all rooms.
+        """
+        extra_inner = b""
+        if mode is not None:
+            extra_inner += _make_protobuf_varint(3, mode.value)
+        if room_ids:
+            for rid in room_ids:
+                extra_inner += _make_protobuf_varint(4, rid)
+
+        if extra_inner:
+            payload = self._build_user_payload(extra_inner)
+            return await self.send_command(TOPIC_CMD_START_PLAN, payload_override=payload)
         return await self.send_command(TOPIC_CMD_START_PLAN)
 
     async def easy_clean(self) -> CommandResponse:
@@ -408,6 +440,16 @@ class NarwalClient:
     async def get_map(self) -> CommandResponse:
         """Fetch the current map from the vacuum (longer timeout for large data)."""
         return await self.send_command(TOPIC_CMD_GET_MAP, timeout=30.0)
+
+    async def fetch_rooms(self) -> None:
+        """Fetch the map and update the room list in self.state."""
+        try:
+            resp = await self.get_map()
+            if resp.success and resp.data:
+                self.state.update_rooms_from_map(resp.data)
+                _LOGGER.info("Fetched %d rooms from map", len(self.state.rooms))
+        except NarwalCommandError:
+            _LOGGER.warning("Failed to fetch rooms from map")
 
     async def request_status_update(self) -> None:
         """Request a status update from the vacuum.

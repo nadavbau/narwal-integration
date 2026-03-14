@@ -4,7 +4,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "narwal"
 
-PLATFORMS = [Platform.VACUUM, Platform.SENSOR, Platform.BUTTON, Platform.CAMERA]
+PLATFORMS = [Platform.VACUUM, Platform.SENSOR, Platform.BUTTON, Platform.CAMERA, Platform.SELECT]
 
 # Config entry data keys
 CONF_EMAIL = "email"
@@ -36,3 +36,17 @@ FAN_SPEED_MAP = {
     "Max": 3,
 }
 FAN_SPEED_REVERSE = {v: k for k, v in FAN_SPEED_MAP.items()}
+
+CLEAN_MODE_LIST = [
+    "Vacuum & Mop",
+    "Vacuum then Mop",
+    "Vacuum Only",
+    "Mop Only",
+]
+CLEAN_MODE_MAP = {
+    "Vacuum & Mop": 1,
+    "Vacuum then Mop": 2,
+    "Vacuum Only": 3,
+    "Mop Only": 4,
+}
+CLEAN_MODE_REVERSE = {v: k for k, v in CLEAN_MODE_MAP.items()}
