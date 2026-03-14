@@ -89,7 +89,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         if state and state.is_paused and state.is_cleaning:
             await self.coordinator.client.resume()
         else:
-            resp = await self.coordinator.client.start()
+            resp = await self.coordinator.client.start_plan()
             if not resp.success:
                 _LOGGER.warning("Start command did not succeed (code=%s)", resp.result_code)
 
