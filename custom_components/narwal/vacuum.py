@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
-from .const import CLEAN_MODE_MAP, DOMAIN, FAN_SPEED_LIST, FAN_SPEED_MAP
+from .const import CLEAN_MODE_MAP, FAN_SPEED_LIST, FAN_SPEED_MAP
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
 from .narwal_client import CleanMode, NarwalCommandError, WorkingStatus
@@ -22,11 +22,17 @@ from .narwal_client import CleanMode, NarwalCommandError, WorkingStatus
 _LOGGER = logging.getLogger(__name__)
 
 WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
-    WorkingStatus.DOCKED: VacuumActivity.DOCKED,
-    WorkingStatus.CHARGED: VacuumActivity.DOCKED,
     WorkingStatus.STANDBY: VacuumActivity.IDLE,
+    WorkingStatus.PAUSED: VacuumActivity.PAUSED,
     WorkingStatus.CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_ALT: VacuumActivity.CLEANING,
+    WorkingStatus.RETURNING: VacuumActivity.RETURNING,
+    WorkingStatus.CHARGING: VacuumActivity.DOCKED,
+    WorkingStatus.MOP_WASHING: VacuumActivity.DOCKED,
+    WorkingStatus.MOP_DRYING: VacuumActivity.DOCKED,
+    WorkingStatus.DOCKED: VacuumActivity.DOCKED,
+    WorkingStatus.DUST_COLLECTING: VacuumActivity.DOCKED,
+    WorkingStatus.CHARGED: VacuumActivity.DOCKED,
     WorkingStatus.ERROR: VacuumActivity.ERROR,
 }
 
@@ -95,21 +101,12 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             }
         return attrs
 
-    def _get_clean_mode(self) -> CleanMode | None:
-        """Read the currently selected clean mode from the select entity."""
-        for entity in self.hass.data.get(DOMAIN, {}).values():
-            if hasattr(entity, "clean_mode_value"):
-                val = entity.clean_mode_value
-                if val is not None:
-                    return CleanMode(val)
-        return None
-
     async def async_start(self) -> None:
         state = self.coordinator.data
         if state and state.is_paused and state.is_cleaning:
             await self.coordinator.client.resume()
         else:
-            mode = self._get_clean_mode()
+            mode = self.coordinator.selected_clean_mode
             resp = await self.coordinator.client.start_plan(mode=mode)
             if not resp.success:
                 _LOGGER.warning("Start command did not succeed (code=%s)", resp.result_code)
@@ -158,8 +155,8 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             mode: CleanMode | None = None
             if mode_name and mode_name in CLEAN_MODE_MAP:
                 mode = CleanMode(CLEAN_MODE_MAP[mode_name])
-            elif mode_name is None:
-                mode = self._get_clean_mode()
+            else:
+                mode = self.coordinator.selected_clean_mode
 
             if not room_ids:
                 _LOGGER.warning("clean_rooms called without room IDs")

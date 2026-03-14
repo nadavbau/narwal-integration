@@ -85,10 +85,16 @@ class NarwalState:
         # Field 3 = mode/state sub-message
         if 3 in fields and isinstance(fields[3], bytes):
             sub = parse_protobuf_fields(fields[3])
+            _LOGGER.debug("Base status sub-fields: %s", sub)
             if 1 in sub and isinstance(sub[1], int):
+                raw_status = sub[1]
                 try:
-                    self.working_status = WorkingStatus(sub[1])
+                    self.working_status = WorkingStatus(raw_status)
                 except ValueError:
+                    _LOGGER.warning(
+                        "Unknown working_status value: %d, sub-fields: %s",
+                        raw_status, sub,
+                    )
                     self.working_status = WorkingStatus.UNKNOWN
             self.is_paused = sub.get(2, 0) == 1 or sub.get(4, 0) == 1
             self.is_returning = sub.get(7, 0) == 1
@@ -97,8 +103,19 @@ class NarwalState:
         self.is_cleaning = self.working_status in (
             WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT
         )
-        if self.working_status in (WorkingStatus.DOCKED, WorkingStatus.CHARGED):
+        if self.working_status == WorkingStatus.RETURNING:
+            self.is_returning = True
+        if self.working_status in (
+            WorkingStatus.DOCKED, WorkingStatus.CHARGED,
+            WorkingStatus.CHARGING, WorkingStatus.MOP_WASHING,
+            WorkingStatus.MOP_DRYING, WorkingStatus.DUST_COLLECTING,
+        ):
             self.is_docked = True
+        _LOGGER.warning(
+            "State update: status=%s battery=%.1f%% cleaning=%s paused=%s returning=%s docked=%s",
+            self.working_status.name, self.battery_level,
+            self.is_cleaning, self.is_paused, self.is_returning, self.is_docked,
+        )
 
     rooms: list[RoomInfo] = field(default_factory=list)
 

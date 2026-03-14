@@ -62,9 +62,18 @@ TOPIC_UPGRADE_STATUS = "status/upgrade_status"
 class WorkingStatus(IntEnum):
     UNKNOWN = 0
     STANDBY = 1
+    PAUSED = 2
+    SLEEPING = 3
     CLEANING = 4
     CLEANING_ALT = 5
+    RETURNING = 6
+    CHARGING = 7
+    MOP_WASHING = 8
+    MOP_DRYING = 9
     DOCKED = 10
+    DUST_COLLECTING = 11
+    UPGRADING = 12
+    SELF_CHECK = 13
     CHARGED = 14
     ERROR = 99
 

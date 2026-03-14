@@ -24,6 +24,7 @@ from .const import (
     DOMAIN,
 )
 from .narwal_client import (
+    CleanMode,
     NarwalClient,
     NarwalCloud,
     NarwalCloudError,
@@ -50,6 +51,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         )
         self.config_entry = entry
         self._cloud: NarwalCloud | None = None
+        self.selected_clean_mode: CleanMode = CleanMode.VACUUM_AND_MOP
 
         if CONF_ACCESS_TOKEN in entry.data:
             self._setup_from_cloud_config(entry)
