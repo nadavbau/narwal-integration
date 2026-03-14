@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import struct
 from dataclasses import dataclass, field
-from .const import ROOM_NAME_CODES, WorkingStatus
+from .const import ROOM_SUB_TYPE_NAMES, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -120,13 +120,14 @@ class NarwalState:
     rooms: list[RoomInfo] = field(default_factory=list)
 
     def update_rooms_from_map(self, map_data: bytes) -> None:
-        """Extract room list from map protobuf (field 32 of map response data)."""
-        fields = parse_protobuf_fields(map_data)
-        raw_rooms = fields.get(32)
-        if not isinstance(raw_rooms, bytes):
-            return
-        self.rooms = _parse_room_entries(raw_rooms)
-        _LOGGER.debug("Parsed %d rooms from map data", len(self.rooms))
+        """Extract room list from map protobuf field 12 (repeated room entries).
+
+        Field 12 contains user-visible rooms with proper sub_type classification
+        and optional user-assigned names.  It appears as a repeated protobuf field
+        so we must use parse_protobuf_repeated to collect all occurrences.
+        """
+        self.rooms = _parse_rooms_from_field12(map_data)
+        _LOGGER.debug("Parsed %d rooms from map data (field 12)", len(self.rooms))
 
     def update_working_status(self, payload: bytes) -> None:
         """Update from working_status protobuf."""
@@ -141,51 +142,134 @@ class NarwalState:
 
 @dataclass
 class RoomInfo:
-    """A room discovered from the vacuum's map."""
+    """A room discovered from the vacuum's map.
+
+    Parsed from map response field 12 (repeated). Each entry contains:
+      field 1: room_id
+      field 2: room_sub_type (ROOM_SUB_TYPE enum)
+      field 3: user-assigned name (UTF-8, empty if not renamed by user)
+      field 4: category (1=room, 2=utility/small space)
+      field 8: instance_index (1-based, for numbering duplicates)
+    """
 
     room_id: int
-    name_code: int
-    name: str
+    room_sub_type: int = 0
+    name: str = ""
+    category: int = 0
+    instance_index: int = 0
 
     @property
     def display_name(self) -> str:
-        base = self.name or ROOM_NAME_CODES.get(self.name_code, f"Room {self.room_id}")
-        return f"{base} ({self.room_id})"
+        if self.name:
+            return self.name
+        base = ROOM_SUB_TYPE_NAMES.get(self.room_sub_type, f"Room {self.room_id}")
+        if self.instance_index > 1:
+            return f"{base} {self.instance_index}"
+        return base
 
 
-def _parse_room_entries(data: bytes) -> list[RoomInfo]:
-    """Parse repeated room sub-messages from map field 32."""
+def _parse_rooms_from_field12(map_data: bytes) -> list[RoomInfo]:
+    """Extract rooms from repeated field 12 entries in the map protobuf."""
+    all_fields = parse_protobuf_repeated(map_data)
+    entries = all_fields.get(12, [])
     rooms: list[RoomInfo] = []
-    idx = 0
-    while idx < len(data):
-        tag = data[idx]
-        wire_type = tag & 0x07
-        if wire_type != 2:
-            break
-        idx += 1
-        length = 0
-        shift = 0
-        while idx < len(data):
-            b = data[idx]
-            length |= (b & 0x7F) << shift
-            shift += 7
-            idx += 1
-            if b & 0x80 == 0:
-                break
-        if idx + length > len(data):
-            break
-        room_bytes = data[idx : idx + length]
-        idx += length
-
-        rf = parse_protobuf_fields(room_bytes)
+    for entry in entries:
+        if not isinstance(entry, bytes):
+            continue
+        rf = parse_protobuf_fields(entry)
         room_id = rf.get(1)
-        name_code = rf.get(2, 0)
-        custom_name = rf.get(5, "")
         if not isinstance(room_id, int):
             continue
-        name = custom_name if isinstance(custom_name, str) and custom_name else ""
-        rooms.append(RoomInfo(room_id=room_id, name_code=name_code, name=name))
+        name_raw = rf.get(3, "")
+        if isinstance(name_raw, bytes):
+            try:
+                name = name_raw.decode("utf-8")
+            except UnicodeDecodeError:
+                name = ""
+        elif isinstance(name_raw, str):
+            name = name_raw
+        else:
+            name = ""
+        rooms.append(RoomInfo(
+            room_id=room_id,
+            room_sub_type=rf.get(2, 0) if isinstance(rf.get(2), int) else 0,
+            name=name,
+            category=rf.get(4, 0) if isinstance(rf.get(4), int) else 0,
+            instance_index=rf.get(8, 0) if isinstance(rf.get(8), int) else 0,
+        ))
     return rooms
+
+
+def parse_protobuf_repeated(data: bytes) -> dict[int, list]:
+    """Parse protobuf collecting ALL occurrences of each field as a list.
+
+    Standard parse_protobuf_fields keeps only the last value per field number,
+    which silently drops repeated fields.  This variant returns
+    {field_num: [value1, value2, ...]} so repeated entries are preserved.
+    """
+    fields: dict[int, list] = {}
+    idx = 0
+    while idx < len(data):
+        tag_byte = data[idx]
+        wire_type = tag_byte & 0x07
+        field_num = tag_byte >> 3
+
+        if tag_byte & 0x80:
+            tag_val = 0
+            shift = 0
+            while idx < len(data):
+                b = data[idx]
+                tag_val |= (b & 0x7F) << shift
+                shift += 7
+                idx += 1
+                if b & 0x80 == 0:
+                    break
+            wire_type = tag_val & 0x07
+            field_num = tag_val >> 3
+        else:
+            idx += 1
+
+        if wire_type == 0:
+            val = 0
+            shift = 0
+            while idx < len(data):
+                b = data[idx]
+                val |= (b & 0x7F) << shift
+                shift += 7
+                idx += 1
+                if b & 0x80 == 0:
+                    break
+            fields.setdefault(field_num, []).append(val)
+        elif wire_type == 1:
+            if idx + 8 <= len(data):
+                fields.setdefault(field_num, []).append(
+                    int.from_bytes(data[idx : idx + 8], "little")
+                )
+                idx += 8
+        elif wire_type == 2:
+            length = 0
+            shift = 0
+            while idx < len(data):
+                b = data[idx]
+                length |= (b & 0x7F) << shift
+                shift += 7
+                idx += 1
+                if b & 0x80 == 0:
+                    break
+            if idx + length <= len(data):
+                fields.setdefault(field_num, []).append(data[idx : idx + length])
+                idx += length
+            else:
+                break
+        elif wire_type == 5:
+            if idx + 4 <= len(data):
+                fields.setdefault(field_num, []).append(
+                    int.from_bytes(data[idx : idx + 4], "little")
+                )
+                idx += 4
+        else:
+            break
+    return fields
 
 
 def parse_protobuf_fields(data: bytes) -> dict:
