@@ -500,6 +500,11 @@ class NarwalClient:
         self._client = None
         self._connected.clear()
         if client:
+            client.on_connect = None
+            client.on_message = None
+            client.on_disconnect = None
+            client.on_subscribe = None
+            client.on_log = None
             loop = asyncio.get_running_loop()
             try:
                 await asyncio.wait_for(
@@ -507,13 +512,20 @@ class NarwalClient:
                     timeout=5.0,
                 )
             except TimeoutError:
-                _LOGGER.warning("MQTT disconnect timed out — forcing loop stop")
+                _LOGGER.warning("MQTT disconnect timed out — forcing cleanup")
+                try:
+                    client.loop_stop(force=True)
+                except Exception:
+                    pass
 
     @staticmethod
     def _stop_mqtt_client(client: mqtt.Client) -> None:
         """Stop the paho-mqtt network loop and disconnect (blocking)."""
+        try:
+            client.disconnect()
+        except Exception:
+            pass
         client.loop_stop()
-        client.disconnect()
 
     @staticmethod
     def discover_devices_via_mqtt(
