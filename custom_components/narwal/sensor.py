@@ -89,6 +89,8 @@ class NarwalStatusSensor(NarwalEntity, SensorEntity):
         state = self.coordinator.data
         if state is None:
             return "Unknown"
+        if not state.device_reachable:
+            return "Sleeping"
         return STATUS_NAMES.get(state.working_status, "Unknown")
 
     @property

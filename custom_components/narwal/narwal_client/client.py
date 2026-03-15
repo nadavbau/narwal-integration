@@ -96,7 +96,8 @@ class NarwalClient:
 
         self._mqtt_username = mqtt_username
         self._mqtt_password = mqtt_password
-        self._mqtt_client_id = mqtt_client_id or f"app_{user_uuid}_{uuid.uuid4()}"
+        self._mqtt_client_id_prefix = mqtt_client_id or f"app_{user_uuid}"
+        self._mqtt_client_id = f"{self._mqtt_client_id_prefix}_{uuid.uuid4()}"
 
         self._client: mqtt.Client | None = None
         self._connected = threading.Event()
@@ -193,6 +194,7 @@ class NarwalClient:
 
         Runs in an executor thread to avoid blocking the event loop.
         """
+        self._mqtt_client_id = f"{self._mqtt_client_id_prefix}_{uuid.uuid4()}"
         _LOGGER.info(
             "Connecting to %s:%d as client_id=%s, base_topic=%s",
             self.broker,
@@ -227,14 +229,14 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.warning(
+        _LOGGER.info(
             "MQTT connected: %s | base_topic=%s | device_name=%s",
             reason_code, self.base_topic, self.device_name,
         )
         if str(reason_code) == "Success" or reason_code == 0:
             topic = f"{self.base_topic}/#"
             client.subscribe(topic, qos=1)
-            _LOGGER.warning("Subscribed to %s", topic)
+            _LOGGER.info("Subscribed to %s", topic)
             self._connected.set()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
@@ -252,7 +254,7 @@ class NarwalClient:
     def _on_message(self, client, userdata, msg):
         """Handle all incoming messages: command responses and broadcasts."""
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.warning(
+        _LOGGER.debug(
             "MQTT << %s (%d bytes) full_topic=%s pending=%s",
             topic_suffix, len(msg.payload), msg.topic,
             list(self._pending_responses.keys()),
@@ -348,7 +350,7 @@ class NarwalClient:
         else:
             payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Published >> %s | full_topic=%s | response_topic=%s | rc=%s mid=%s",
             command, topic, response_topic, result.rc, result.mid,
         )

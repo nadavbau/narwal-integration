@@ -73,6 +73,11 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         self._last_fan_speed: str | None = None
 
     @property
+    def available(self) -> bool:
+        state = self.coordinator.data
+        return state is not None and state.device_reachable
+
+    @property
     def activity(self) -> VacuumActivity:
         state = self.coordinator.data
         if state is None:

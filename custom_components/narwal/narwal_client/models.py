@@ -44,6 +44,7 @@ class NarwalState:
     is_docked: bool = False
     elapsed_time: int = 0
     cleaned_area: int = 0
+    device_reachable: bool = False
 
     # Raw protobuf data for fields we don't fully decode yet
     raw_base_status: dict = field(default_factory=dict)
@@ -111,7 +112,8 @@ class NarwalState:
             WorkingStatus.MOP_DRYING, WorkingStatus.DUST_COLLECTING,
         ):
             self.is_docked = True
-        _LOGGER.warning(
+        self.device_reachable = True
+        _LOGGER.info(
             "State update: status=%s battery=%.1f%% cleaning=%s paused=%s returning=%s docked=%s",
             self.working_status.name, self.battery_level,
             self.is_cleaning, self.is_paused, self.is_returning, self.is_docked,
@@ -133,6 +135,7 @@ class NarwalState:
         """Update from working_status protobuf."""
         fields = parse_protobuf_fields(payload)
         self.raw_working_status = fields
+        self.device_reachable = True
 
         if 3 in fields:
             self.elapsed_time = fields[3]

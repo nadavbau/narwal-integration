@@ -91,7 +91,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def async_setup(self) -> None:
         """Set up the coordinator -- always refresh token, then connect to MQTT."""
-        _LOGGER.warning(
+        _LOGGER.info(
             "Setting up Narwal: device_name=%s, product_key=%s, broker=%s",
             self.client.device_name,
             self.client.product_key,
@@ -212,12 +212,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 self._consecutive_failures = 0
             except NarwalCommandError:
                 self._consecutive_failures += 1
+                self.client.state.device_reachable = False
                 _LOGGER.warning(
                     "Status poll failed (%d/%d before reconnect)",
                     self._consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                 )
         else:
             self._consecutive_failures += 1
+            self.client.state.device_reachable = False
             _LOGGER.warning("MQTT not connected, failure count: %d", self._consecutive_failures)
 
         return self.client.state
