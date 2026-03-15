@@ -1,0 +1,41 @@
+---
+description: Narwal MQTT protocol quirks and patterns
+globs: custom_components/narwal/narwal_client/**/*.py
+alwaysApply: false
+---
+
+# Narwal Protocol Notes
+
+## Deep Sleep Behavior
+
+The vacuum maintains its MQTT broker connection during deep sleep but does
+NOT process incoming commands. Publishes succeed (`rc=0`) but no response
+arrives. This is NOT a token/connection issue — the device is simply not
+listening. No amount of reconnecting will help; wait for it to wake.
+
+## Token Expiry
+
+The JWT access token (used as MQTT password) expires. The broker may silently
+stop routing responses before the calculated expiry time. Track consecutive
+command failures and force token refresh + reconnect after 3 failures.
+
+## Two Status Paths
+
+- `status/robot_base_status` — contains WorkingStatus enum, battery, boolean
+  flags (is_cleaning, is_paused, is_returning, is_docked). Sent as push
+  broadcast AND as command response to `status/get_device_base_status`.
+- `status/working_status` — contains ONLY elapsed_time (field 3) and
+  cleaned_area (field 13). Does NOT contain WorkingStatus enum. Sent only
+  during active cleaning.
+
+## Wildcard Subscription
+
+`_on_connect` subscribes to `base_topic/#` which covers all response topics.
+Per-command subscribes are redundant — don't add them. They add latency
+(SUBACK wait) and unnecessary broker overhead.
+
+## Map Data
+
+Map grid is zlib-compressed protobuf containing packed repeated varints.
+Each pixel: `room_id = val >> 8`, `pixel_type = val & 0xFF`.
+Map Y-axis is flipped (mathematical coords → image coords).

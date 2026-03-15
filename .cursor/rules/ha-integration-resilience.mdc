@@ -1,0 +1,40 @@
+---
+description: Home Assistant integration resilience patterns for the Narwal vacuum
+globs: custom_components/narwal/**/*.py
+alwaysApply: false
+---
+
+# HA Integration Resilience
+
+## Setup Must Tolerate Offline Devices
+
+The vacuum enters deep sleep when idle. `async_setup` must never fail due to
+command timeouts — catch `NarwalCommandError` and start with empty state.
+
+```python
+# ❌ BAD — crashes setup when vacuum is asleep
+await self.client.request_status_update()
+
+# ✅ GOOD — setup succeeds, state populates when vacuum wakes
+try:
+    await self.client.request_status_update()
+except NarwalCommandError:
+    _LOGGER.warning("Vacuum may be asleep — will retry on next poll")
+```
+
+## Never Block the Event Loop
+
+All MQTT and SSL operations must run in executors. HA detects blocking calls
+(`ssl.create_default_context`, `threading.Event.wait`) and logs errors.
+
+## Re-raise vs Swallow Errors
+
+- **Setup path**: catch and log command errors (integration must load)
+- **Poll path (`_async_update_data`)**: catch errors, track failure count for reconnect
+- **User-triggered actions** (locate, start, stop): let errors propagate to show in UI
+
+## Broadcast Registration
+
+The vacuum only sends push broadcasts after receiving `active_robot_publish`.
+Re-send this every poll cycle — the vacuum may have woken from deep sleep
+since the last send and doesn't know about us.

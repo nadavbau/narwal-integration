@@ -499,7 +499,13 @@ class NarwalClient:
         self._connected.clear()
         if client:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._stop_mqtt_client, client)
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, self._stop_mqtt_client, client),
+                    timeout=5.0,
+                )
+            except TimeoutError:
+                _LOGGER.warning("MQTT disconnect timed out — forcing loop stop")
 
     @staticmethod
     def _stop_mqtt_client(client: mqtt.Client) -> None:

@@ -1,0 +1,37 @@
+---
+description: Lovelace custom card development patterns
+globs: custom_components/narwal/frontend/**/*.js
+alwaysApply: false
+---
+
+# Lovelace Card Patterns
+
+## Visual Editor
+
+Use `ha-form` with a schema array for card editors — this is how HA's
+built-in editors work and handles entity pickers reliably.
+
+```javascript
+// ❌ BAD — ha-entity-picker in shadow DOM won't render
+const picker = document.createElement("ha-entity-picker");
+picker.hass = this._hass;  // often fails to trigger render
+
+// ✅ GOOD — ha-form handles everything
+const SCHEMA = [
+  { name: "entity", required: true, selector: { entity: { domain: "vacuum" } } },
+  { name: "camera_entity", selector: { entity: { domain: "camera" } } },
+];
+this._form = document.createElement("ha-form");
+this._form.schema = SCHEMA;
+this._form.hass = this._hass;
+this._form.data = this._config;
+```
+
+The editor element must NOT use shadow DOM — append directly to `this`
+(not `this.shadowRoot`) so HA's styling works.
+
+## Entity Resolution
+
+Support explicit config AND auto-detection fallback for all entities
+(camera, battery sensor, mode select). Search `hass.states` for
+`*narwal*` patterns as fallback.
