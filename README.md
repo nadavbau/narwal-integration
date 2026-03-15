@@ -50,7 +50,7 @@ Other Narwal models using the same cloud platform should also work.
 
 ### Finding your Device Name
 
-The Device Name is the 32-character hex string that identifies your specific vacuum on the Narwal cloud. You can find it in the Narwal app's network traffic, or by checking the MQTT topics the vacuum subscribes to. It looks like: `0e3ad71074124690a1cdef68fdfe5258`.
+The Device Name is the 32-character hex string that identifies your specific vacuum on the Narwal cloud. You can find it in the Narwal app's network traffic, or by checking the MQTT topics the vacuum subscribes to. It looks like: `abcdef1234567890abcdef1234567890`.
 
 ## Entities
 

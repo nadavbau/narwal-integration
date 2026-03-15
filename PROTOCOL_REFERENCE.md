@@ -69,7 +69,7 @@ Each message contains `device_id` (numeric cloud ID) and `robot_name`.
 
 **CRITICAL**: The `device_id` from the cloud API (e.g., `132250`) is the
 numeric cloud identifier. The MQTT device name is a **different** 32-character
-hex string (e.g., `0e3ad71074124690a1cdef68fdfe5258`). Using the wrong one
+hex string (e.g., `abcdef1234567890abcdef1234567890`). Using the wrong one
 causes all commands to time out silently because the broker's ACL rejects
 the topics.
 
@@ -104,8 +104,8 @@ The MQTT device name can be found by:
 
 Example:
 ```
-/EHf6cRNRGT/0e3ad71074124690a1cdef68fdfe5258/status/get_device_base_status
-/EHf6cRNRGT/0e3ad71074124690a1cdef68fdfe5258/status/get_device_base_status/response
+/EHf6cRNRGT/<device_name>/status/get_device_base_status
+/EHf6cRNRGT/<device_name>/status/get_device_base_status/response
 ```
 
 ### Subscription Model
