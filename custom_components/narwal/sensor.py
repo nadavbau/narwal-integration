@@ -23,9 +23,18 @@ _LOGGER = logging.getLogger(__name__)
 STATUS_NAMES = {
     WorkingStatus.UNKNOWN: "Unknown",
     WorkingStatus.STANDBY: "Standby",
+    WorkingStatus.PAUSED: "Paused",
+    WorkingStatus.SLEEPING: "Sleeping",
     WorkingStatus.CLEANING: "Cleaning",
     WorkingStatus.CLEANING_ALT: "Cleaning",
+    WorkingStatus.RETURNING: "Returning",
+    WorkingStatus.CHARGING: "Charging",
+    WorkingStatus.MOP_WASHING: "Washing Mop",
+    WorkingStatus.MOP_DRYING: "Drying Mop",
     WorkingStatus.DOCKED: "Docked",
+    WorkingStatus.DUST_COLLECTING: "Emptying Dustbin",
+    WorkingStatus.UPGRADING: "Upgrading",
+    WorkingStatus.SELF_CHECK: "Self Check",
     WorkingStatus.CHARGED: "Charged",
     WorkingStatus.ERROR: "Error",
 }

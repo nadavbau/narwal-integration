@@ -22,8 +22,10 @@ from .narwal_client import CleanMode, NarwalCommandError, WorkingStatus
 _LOGGER = logging.getLogger(__name__)
 
 WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
+    WorkingStatus.UNKNOWN: VacuumActivity.IDLE,
     WorkingStatus.STANDBY: VacuumActivity.IDLE,
     WorkingStatus.PAUSED: VacuumActivity.PAUSED,
+    WorkingStatus.SLEEPING: VacuumActivity.IDLE,
     WorkingStatus.CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_ALT: VacuumActivity.CLEANING,
     WorkingStatus.RETURNING: VacuumActivity.RETURNING,
@@ -32,6 +34,8 @@ WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.MOP_DRYING: VacuumActivity.DOCKED,
     WorkingStatus.DOCKED: VacuumActivity.DOCKED,
     WorkingStatus.DUST_COLLECTING: VacuumActivity.DOCKED,
+    WorkingStatus.UPGRADING: VacuumActivity.IDLE,
+    WorkingStatus.SELF_CHECK: VacuumActivity.IDLE,
     WorkingStatus.CHARGED: VacuumActivity.DOCKED,
     WorkingStatus.ERROR: VacuumActivity.ERROR,
 }

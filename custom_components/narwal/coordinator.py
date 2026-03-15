@@ -195,6 +195,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         if self.client.connected:
             try:
+                await self.client.notify_active()
+            except Exception:
+                _LOGGER.debug("active_robot_publish failed", exc_info=True)
+
+            try:
                 await self.client.request_status_update()
                 self._consecutive_failures = 0
             except NarwalCommandError:
