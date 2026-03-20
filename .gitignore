@@ -30,3 +30,5 @@ adb_log*.txt
 
 # Secrets (never commit real credentials)
 captured_credentials.txt
+.env
+tests/.env
