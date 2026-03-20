@@ -4,6 +4,8 @@
 
 A custom Home Assistant integration for **Narwal** robot vacuums (Freo X Ultra and similar models) that communicates through the Narwal cloud MQTT service.
 
+> **⚠️ Work in Progress** — This integration is under active development. Expect breaking changes, incomplete features, and rough edges. Contributions and bug reports are welcome!
+
 ## Features
 
 - **Vacuum entity** with full control: start, stop, pause, return to dock, locate (beep), fan speed
