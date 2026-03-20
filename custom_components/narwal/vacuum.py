@@ -83,7 +83,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         if state is None:
             return VacuumActivity.IDLE
 
-        if state.is_paused and state.is_cleaning:
+        if state.is_paused:
             return VacuumActivity.PAUSED
         if state.is_returning:
             return VacuumActivity.RETURNING
@@ -112,7 +112,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
 
     async def async_start(self) -> None:
         state = self.coordinator.data
-        if state and state.is_paused and state.is_cleaning:
+        if state and state.is_paused:
             resp = await self.coordinator.client.resume()
             if not resp.success:
                 _LOGGER.warning("Resume returned code=%s", resp.result_code)
@@ -120,7 +120,11 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             mode = self.coordinator.selected_clean_mode
             resp = await self.coordinator.client.start_plan(mode=mode)
             if not resp.success:
-                _LOGGER.warning("Start returned code=%s", resp.result_code)
+                _LOGGER.warning(
+                    "Start returned code=%s (mode=%s, status=%s)",
+                    resp.result_code, mode.name,
+                    state.working_status.name if state else "unknown",
+                )
 
     async def async_stop(self, **kwargs: Any) -> None:
         resp = await self.coordinator.client.stop()
@@ -177,13 +181,20 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
                 _LOGGER.warning("clean_rooms called without room IDs")
                 return
 
-            _LOGGER.info("Starting room clean: rooms=%s mode=%s", room_ids, mode)
+            state = self.coordinator.data
+            _LOGGER.info(
+                "Starting room clean: rooms=%s mode=%s vacuum_status=%s",
+                room_ids, mode,
+                state.working_status.name if state else "unknown",
+            )
             resp = await self.coordinator.client.start_plan(
                 mode=mode, room_ids=room_ids
             )
             if not resp.success:
                 _LOGGER.warning(
-                    "Room clean returned code=%s", resp.result_code
+                    "Room clean returned code=%s (rooms=%s, mode=%s, status=%s)",
+                    resp.result_code, room_ids, mode.name if mode else "None",
+                    state.working_status.name if state else "unknown",
                 )
         else:
             _LOGGER.warning("Unknown send_command: %s", command)

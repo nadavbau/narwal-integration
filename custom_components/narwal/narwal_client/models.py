@@ -97,7 +97,7 @@ class NarwalState:
                         raw_status, sub,
                     )
                     self.working_status = WorkingStatus.UNKNOWN
-            self.is_paused = sub.get(2, 0) == 1 or sub.get(4, 0) == 1
+            self.is_paused = self.working_status == WorkingStatus.PAUSED
             self.is_returning = sub.get(7, 0) == 1
             self.is_docked = sub.get(10, 0) == 1
 

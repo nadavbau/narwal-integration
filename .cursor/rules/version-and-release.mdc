@@ -20,6 +20,12 @@ Always push with it unset:
 GH_TOKEN="" GITHUB_TOKEN="" git push origin main
 ```
 
+## Do NOT Create Tags or Releases
+
+A GitHub Actions workflow automatically creates the git tag and GitHub
+release when changes are pushed to `main`. Never manually run `git tag`
+or `gh release create` — it will conflict with the automated workflow.
+
 ## No Personal Data
 
 Never commit device IDs, user UUIDs, access tokens, or email addresses.
