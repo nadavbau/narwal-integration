@@ -17,7 +17,7 @@ from . import NarwalConfigEntry
 from .const import CLEAN_MODE_MAP, FAN_SPEED_LIST, FAN_SPEED_MAP
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import CleanMode, NarwalCommandError, WorkingStatus
+from .narwal_client import CleanMode, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -116,9 +116,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             await self.coordinator.client.resume()
         else:
             mode = self.coordinator.selected_clean_mode
-            resp = await self.coordinator.client.start_plan(mode=mode)
-            if not resp.success:
-                _LOGGER.warning("Start command did not succeed (code=%s)", resp.result_code)
+            await self.coordinator.client.start_plan(mode=mode)
 
     async def async_stop(self, **kwargs: Any) -> None:
         await self.coordinator.client.stop()
@@ -127,9 +125,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         await self.coordinator.client.pause()
 
     async def async_return_to_base(self, **kwargs: Any) -> None:
-        resp = await self.coordinator.client.return_to_base()
-        if not resp.success:
-            _LOGGER.warning("Return-to-base did not succeed (code=%s)", resp.result_code)
+        await self.coordinator.client.return_to_base()
 
     async def async_locate(self, **kwargs: Any) -> None:
         await self.coordinator.client.locate()
@@ -172,12 +168,8 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
                 return
 
             _LOGGER.info("Starting room clean: rooms=%s mode=%s", room_ids, mode)
-            resp = await self.coordinator.client.start_plan(
+            await self.coordinator.client.start_plan(
                 mode=mode, room_ids=room_ids
             )
-            if not resp.success:
-                _LOGGER.warning(
-                    "Room clean did not succeed (code=%s)", resp.result_code
-                )
         else:
             _LOGGER.warning("Unknown send_command: %s", command)
