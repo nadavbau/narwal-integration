@@ -173,7 +173,7 @@ class NarwalMQTT:
         self._response_payload: bytes | None = None
         self._message_handlers: list = []
 
-        cid = f"test_{user_uuid}_{uuid_mod.uuid4()}"
+        cid = f"app_{user_uuid}_{uuid_mod.uuid4()}"
         self.client = mqtt.Client(
             client_id=cid, protocol=mqtt.MQTTv5,
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,

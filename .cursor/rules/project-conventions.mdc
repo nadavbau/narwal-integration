@@ -31,3 +31,9 @@ Examples:
 - Python 3.12+, type hints on all public functions
 - Use `from __future__ import annotations` in all modules
 - Follow Home Assistant coding standards for entity classes
+
+## Security
+
+- NEVER commit personal identifiers, credentials, API keys, tokens, passwords, device IDs, or email addresses
+- Use placeholder values in example/template files (e.g. `your_email@example.com`, `your_device_id`)
+- Credentials in test scripts must be read from environment variables, never hardcoded

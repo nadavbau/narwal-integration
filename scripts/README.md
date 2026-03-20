@@ -1,6 +1,6 @@
-# Narwal Test Scripts
+# Narwal Helper Scripts
 
-Standalone test scripts for debugging the Narwal MQTT protocol outside of Home Assistant.
+Standalone scripts for debugging and exploring the Narwal MQTT protocol outside of Home Assistant.
 
 ## Prerequisites
 
@@ -13,9 +13,9 @@ pip install paho-mqtt
 All scripts read credentials from environment variables. Copy `.env.example` and fill in your values:
 
 ```bash
-cp tests/.env.example tests/.env
-# Edit tests/.env with your credentials
-source tests/.env && export NARWAL_EMAIL NARWAL_PASSWORD NARWAL_REGION NARWAL_DEVICE_ID
+cp scripts/.env.example scripts/.env
+# Edit scripts/.env with your credentials
+source scripts/.env && export NARWAL_EMAIL NARWAL_PASSWORD NARWAL_REGION NARWAL_DEVICE_ID
 ```
 
 | Variable | Required | Description |
@@ -28,10 +28,10 @@ source tests/.env && export NARWAL_EMAIL NARWAL_PASSWORD NARWAL_REGION NARWAL_DE
 
 ## Scripts
 
-All scripts should be run from the `tests/` directory:
+All scripts should be run from the `scripts/` directory:
 
 ```bash
-cd tests
+cd scripts
 ```
 
 ### `sniff_app.py` — MQTT Traffic Sniffer
@@ -65,6 +65,16 @@ python test_clean_rooms.py --vacuum-only --passes 1
 # Test multi-room cleaning
 python test_clean_rooms.py --rooms 2 --multi 1,4,7
 ```
+
+### `discover_device.py` — MQTT Device Discovery
+
+Attempts to discover the MQTT device name by subscribing to various wildcard and system topics on the broker. Useful for verifying MQTT connectivity and testing if the broker exposes device info.
+
+```bash
+python discover_device.py
+```
+
+**Note:** The Narwal MQTT broker does not currently support wildcard subscriptions for message delivery, so this script serves primarily as a diagnostic tool.
 
 ### `_common.py` — Shared Helpers
 
