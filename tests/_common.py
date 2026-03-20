@@ -5,7 +5,7 @@ All credentials are read from environment variables:
   NARWAL_PASSWORD   — Narwal account password
   NARWAL_REGION     — API region (us, il, eu, cn). Default: il
   NARWAL_DEVICE_ID  — Device name / ID (hex string from the MQTT topic)
-  NARWAL_PRODUCT_KEY — Product key. Default: EHf6cRNRGT
+  NARWAL_PRODUCT_KEY — Product key (found in MQTT topic path)
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def get_config() -> dict:
         "password": _require_env("NARWAL_PASSWORD"),
         "region": region,
         "device_id": _require_env("NARWAL_DEVICE_ID"),
-        "product_key": os.environ.get("NARWAL_PRODUCT_KEY", "EHf6cRNRGT"),
+        "product_key": _require_env("NARWAL_PRODUCT_KEY"),
         "api_host": API_REGIONS.get(region, API_REGIONS["us"]),
         "mqtt_host": MQTT_REGIONS.get(region, MQTT_REGIONS["us"]),
     }

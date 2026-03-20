@@ -24,7 +24,7 @@ source tests/.env && export NARWAL_EMAIL NARWAL_PASSWORD NARWAL_REGION NARWAL_DE
 | `NARWAL_PASSWORD` | Yes | Narwal account password |
 | `NARWAL_REGION` | No | API region: `us`, `il`, `eu`, `cn` (default: `il`) |
 | `NARWAL_DEVICE_ID` | Yes | Device hex ID (from MQTT topic path) |
-| `NARWAL_PRODUCT_KEY` | No | Product key (default: `EHf6cRNRGT`) |
+| `NARWAL_PRODUCT_KEY` | No | Product key (found in MQTT topic path) |
 
 ## Scripts
 
