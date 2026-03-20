@@ -231,9 +231,9 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.info(
-            "MQTT connected: %s | base_topic=%s | device_name=%s",
-            reason_code, self.base_topic, self.device_name,
+        _LOGGER.warning(
+            "MQTT connected: %s | base_topic=%s | client_id=%s",
+            reason_code, self.base_topic, self._mqtt_client_id,
         )
         if str(reason_code) == "Success" or reason_code == 0:
             # Narwal's Aliyun IoT broker only routes messages to EXPLICIT
@@ -244,8 +244,8 @@ class NarwalClient:
                 f"{self.base_topic}/{TOPIC_WORKING_STATUS}",
             ]
             for bt in broadcast_topics:
-                client.subscribe(bt, qos=1)
-                _LOGGER.info("Subscribed to broadcast: %s", bt)
+                rc, mid = client.subscribe(bt, qos=1)
+                _LOGGER.warning("Subscribed to broadcast: %s (rc=%s mid=%s)", bt, rc, mid)
             self._connected.set()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
@@ -263,9 +263,9 @@ class NarwalClient:
     def _on_message(self, client, userdata, msg):
         """Handle all incoming messages: command responses and broadcasts."""
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.debug(
-            "MQTT << %s (%d bytes) full_topic=%s pending=%s",
-            topic_suffix, len(msg.payload), msg.topic,
+        _LOGGER.warning(
+            "MQTT << %s (%d bytes) pending=%s",
+            topic_suffix, len(msg.payload),
             list(self._pending_responses.keys()),
         )
 
@@ -351,13 +351,14 @@ class NarwalClient:
 
         # Narwal's Aliyun IoT broker only routes messages to explicit
         # subscriptions — the wildcard doesn't deliver.  Subscribe to
-        # the specific response topic and wait for SUBACK before publishing.
-        sub_event = threading.Event()
-        result_sub = self._client.subscribe(response_topic, qos=1)
-        self._pending_subacks[result_sub[1]] = sub_event
-        if not sub_event.wait(timeout=5.0):
-            self._pending_subacks.pop(result_sub[1], None)
-            _LOGGER.warning("SUBACK timeout for %s", response_topic)
+        # the specific response topic and wait briefly for SUBACK.
+        rc_sub, mid_sub = self._client.subscribe(response_topic, qos=1)
+        _LOGGER.warning(
+            "Subscribed to %s (rc=%s mid=%s)", response_topic, rc_sub, mid_sub,
+        )
+        if rc_sub != 0:
+            _LOGGER.error("Subscribe FAILED for %s: rc=%s", response_topic, rc_sub)
+        time.sleep(0.5)
 
         response_event = threading.Event()
         response_holder: list[bytes | None] = [None]
@@ -369,7 +370,7 @@ class NarwalClient:
         else:
             payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.debug(
+        _LOGGER.warning(
             "Published >> %s | response_topic=%s | rc=%s mid=%s",
             command, response_topic, result.rc, result.mid,
         )
