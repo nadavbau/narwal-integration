@@ -33,7 +33,7 @@ The Narwal cloud API does not expose the MQTT device name (a 32-character hex st
 ### Requirements
 
 - A Mac with an **Ethernet** connection to your network
-- Your phone running the Narwal app on the same network
+- Your phone with the Narwal app installed
 - macOS Internet Sharing (to route phone traffic through the Mac)
 
 ### Steps
