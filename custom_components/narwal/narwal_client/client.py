@@ -411,17 +411,17 @@ class NarwalClient:
         except Exception:
             _LOGGER.debug("active_robot notification failed", exc_info=True)
 
-    async def locate(self) -> None:
-        await self.send_command_no_response(TOPIC_CMD_YELL)
+    async def locate(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_YELL)
 
-    async def start(self) -> None:
-        await self.send_command_no_response(TOPIC_CMD_START_CLEAN)
+    async def start(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_START_CLEAN)
 
     async def start_plan(
         self,
         mode: CleanMode | None = None,
         room_ids: list[int] | None = None,
-    ) -> None:
+    ) -> CommandResponse:
         """Start a cleaning plan.
 
         Args:
@@ -438,34 +438,31 @@ class NarwalClient:
 
         if extra_inner:
             payload = self._build_user_payload(extra_inner)
-            await self.send_command_no_response(
-                TOPIC_CMD_START_PLAN, payload_override=payload
-            )
-        else:
-            await self.send_command_no_response(TOPIC_CMD_START_PLAN)
+            return await self.send_command(TOPIC_CMD_START_PLAN, payload_override=payload)
+        return await self.send_command(TOPIC_CMD_START_PLAN)
 
-    async def easy_clean(self) -> None:
-        await self.send_command_no_response(TOPIC_CMD_EASY_CLEAN)
+    async def easy_clean(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_EASY_CLEAN)
 
-    async def pause(self) -> None:
-        await self.send_command_no_response(TOPIC_CMD_PAUSE)
+    async def pause(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_PAUSE)
 
-    async def resume(self) -> None:
-        await self.send_command_no_response(TOPIC_CMD_RESUME)
+    async def resume(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_RESUME)
 
-    async def stop(self) -> None:
-        await self.send_command_no_response(TOPIC_CMD_FORCE_END)
+    async def stop(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_FORCE_END)
 
-    async def return_to_base(self) -> None:
-        await self.send_command_no_response(TOPIC_CMD_RECALL)
+    async def return_to_base(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_RECALL)
 
-    async def set_fan_speed(self, level: FanLevel) -> None:
+    async def set_fan_speed(self, level: FanLevel) -> CommandResponse:
         extra = _make_protobuf_varint(1, level.value)
-        await self.send_command_no_response(TOPIC_CMD_SET_FAN_LEVEL, extra)
+        return await self.send_command(TOPIC_CMD_SET_FAN_LEVEL, extra)
 
-    async def set_mop_humidity(self, level: MopHumidity) -> None:
+    async def set_mop_humidity(self, level: MopHumidity) -> CommandResponse:
         extra = _make_protobuf_varint(1, level.value)
-        await self.send_command_no_response(TOPIC_CMD_SET_MOP_HUMIDITY, extra)
+        return await self.send_command(TOPIC_CMD_SET_MOP_HUMIDITY, extra)
 
     async def get_device_info(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_GET_DEVICE_INFO)

@@ -17,7 +17,7 @@ from . import NarwalConfigEntry
 from .const import CLEAN_MODE_MAP, FAN_SPEED_LIST, FAN_SPEED_MAP
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import CleanMode, WorkingStatus
+from .narwal_client import CleanMode, NarwalCommandError, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,19 +113,29 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
     async def async_start(self) -> None:
         state = self.coordinator.data
         if state and state.is_paused and state.is_cleaning:
-            await self.coordinator.client.resume()
+            resp = await self.coordinator.client.resume()
+            if not resp.success:
+                _LOGGER.warning("Resume returned code=%s", resp.result_code)
         else:
             mode = self.coordinator.selected_clean_mode
-            await self.coordinator.client.start_plan(mode=mode)
+            resp = await self.coordinator.client.start_plan(mode=mode)
+            if not resp.success:
+                _LOGGER.warning("Start returned code=%s", resp.result_code)
 
     async def async_stop(self, **kwargs: Any) -> None:
-        await self.coordinator.client.stop()
+        resp = await self.coordinator.client.stop()
+        if not resp.success:
+            _LOGGER.warning("Stop returned code=%s", resp.result_code)
 
     async def async_pause(self) -> None:
-        await self.coordinator.client.pause()
+        resp = await self.coordinator.client.pause()
+        if not resp.success:
+            _LOGGER.warning("Pause returned code=%s", resp.result_code)
 
     async def async_return_to_base(self, **kwargs: Any) -> None:
-        await self.coordinator.client.return_to_base()
+        resp = await self.coordinator.client.return_to_base()
+        if not resp.success:
+            _LOGGER.warning("Return-to-base returned code=%s", resp.result_code)
 
     async def async_locate(self, **kwargs: Any) -> None:
         await self.coordinator.client.locate()
@@ -168,8 +178,12 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
                 return
 
             _LOGGER.info("Starting room clean: rooms=%s mode=%s", room_ids, mode)
-            await self.coordinator.client.start_plan(
+            resp = await self.coordinator.client.start_plan(
                 mode=mode, room_ids=room_ids
             )
+            if not resp.success:
+                _LOGGER.warning(
+                    "Room clean returned code=%s", resp.result_code
+                )
         else:
             _LOGGER.warning("Unknown send_command: %s", command)

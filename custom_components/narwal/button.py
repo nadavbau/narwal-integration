@@ -39,4 +39,6 @@ class NarwalLocateButton(NarwalEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Send the yell/locate command to the vacuum."""
-        await self.coordinator.client.locate()
+        resp = await self.coordinator.client.locate()
+        if not resp.success:
+            _LOGGER.warning("Locate returned code=%s", resp.result_code)
