@@ -231,7 +231,7 @@ class NarwalClient:
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.warning(
+        _LOGGER.info(
             "MQTT connected: %s | base_topic=%s | client_id=%s",
             reason_code, self.base_topic, self._mqtt_client_id,
         )
@@ -245,7 +245,7 @@ class NarwalClient:
             ]
             for bt in broadcast_topics:
                 rc, mid = client.subscribe(bt, qos=1)
-                _LOGGER.warning("Subscribed to broadcast: %s (rc=%s mid=%s)", bt, rc, mid)
+                _LOGGER.debug("Subscribed to broadcast: %s (rc=%s mid=%s)", bt, rc, mid)
             self._connected.set()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
@@ -263,7 +263,7 @@ class NarwalClient:
     def _on_message(self, client, userdata, msg):
         """Handle all incoming messages: command responses and broadcasts."""
         topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.warning(
+        _LOGGER.debug(
             "MQTT << %s (%d bytes) pending=%s",
             topic_suffix, len(msg.payload),
             list(self._pending_responses.keys()),
@@ -353,7 +353,7 @@ class NarwalClient:
         # subscriptions — the wildcard doesn't deliver.  Subscribe to
         # the specific response topic and wait briefly for SUBACK.
         rc_sub, mid_sub = self._client.subscribe(response_topic, qos=1)
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Subscribed to %s (rc=%s mid=%s)", response_topic, rc_sub, mid_sub,
         )
         if rc_sub != 0:
@@ -370,7 +370,7 @@ class NarwalClient:
         else:
             payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Published >> %s | response_topic=%s | rc=%s mid=%s",
             command, response_topic, result.rc, result.mid,
         )
@@ -404,10 +404,35 @@ class NarwalClient:
 
     # --- High-level commands ---
 
+    def _build_active_robot_payload(self) -> bytes:
+        """Build active_robot_publish payload matching the Narwal app format.
+
+        The app sends keepalive parameters OUTSIDE the Narwal auth frame:
+          field 1 (sub-msg): {1:2000, 2:2000, 3:2000}  — push intervals (ms)
+          field 8: 0
+          field 2: 60000  — keepalive interval (ms)
+          field 3: 0
+        """
+        keepalive_config = (
+            _make_protobuf_varint(1, 2000)
+            + _make_protobuf_varint(2, 2000)
+            + _make_protobuf_varint(3, 2000)
+        )
+        extra = (
+            _make_protobuf_string(1, keepalive_config)
+            + _make_protobuf_varint(8, 0)
+            + _make_protobuf_varint(2, 60000)
+            + _make_protobuf_varint(3, 0)
+        )
+        return self._build_user_payload() + extra
+
     async def notify_active(self) -> None:
         """Announce this client to the vacuum, triggering push status broadcasts."""
         try:
-            await self.send_command_no_response(TOPIC_CMD_ACTIVE_ROBOT)
+            payload = self._build_active_robot_payload()
+            await self.send_command_no_response(
+                TOPIC_CMD_ACTIVE_ROBOT, payload_override=payload,
+            )
             _LOGGER.info("Sent active_robot notification")
         except Exception:
             _LOGGER.debug("active_robot notification failed", exc_info=True)
@@ -415,35 +440,101 @@ class NarwalClient:
     async def locate(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_YELL)
 
+    def _build_clean_payload(
+        self,
+        room_ids: list[int],
+        mode: CleanMode = CleanMode.VACUUM_AND_MOP,
+        fan_level: FanLevel = FanLevel.NORMAL,
+        mop_humidity: MopHumidity = MopHumidity.NORMAL,
+        passes: int = 2,
+    ) -> bytes:
+        """Build a clean/start_clean payload matching the Narwal app format.
+
+        The Narwal frame (auth) comes first, then a clean configuration
+        protobuf is appended OUTSIDE the frame.
+        """
+        vacuum_on = mode in (CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP, CleanMode.VACUUM_ONLY)
+        mop_on = mode in (CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP, CleanMode.MOP_ONLY)
+
+        global_config = _make_protobuf_varint(1, 1) + _make_protobuf_varint(2, passes)
+
+        room_entries = b""
+        for rid in room_ids:
+            entry = (
+                _make_protobuf_varint(1, rid)
+                + _make_protobuf_varint(2, passes)
+                + _make_protobuf_varint(3, 1 if vacuum_on else 0)
+                + _make_protobuf_varint(4, 1 if mop_on else 2)
+                + _make_protobuf_varint(5, fan_level.value)
+                + _make_protobuf_varint(6, mop_humidity.value)
+                + _make_protobuf_varint(7, 1)
+                + _make_protobuf_varint(8, 1)
+                + _make_protobuf_varint(9, 1)
+                + _make_protobuf_varint(10, 0)
+            )
+            room_entries += _make_protobuf_string(2, entry)
+
+        room_list = (
+            _make_protobuf_string(1, global_config)
+            + room_entries
+            + _make_protobuf_varint(3, 1)
+        )
+
+        clean_config = (
+            _make_protobuf_varint(1, 1)
+            + _make_protobuf_string(2, room_list)
+            + _make_protobuf_varint(3, 1)
+            + _make_protobuf_string(4, _make_protobuf_varint(1, 1) + _make_protobuf_varint(5, 0))
+            + _make_protobuf_varint(5, 1)
+        )
+
+        frame = self._build_user_payload()
+        return frame + _make_protobuf_string(1, clean_config)
+
     async def start(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_START_CLEAN)
+        return await self.start_clean()
+
+    async def start_clean(
+        self,
+        mode: CleanMode | None = None,
+        room_ids: list[int] | None = None,
+        fan_level: FanLevel = FanLevel.NORMAL,
+        mop_humidity: MopHumidity = MopHumidity.NORMAL,
+    ) -> CommandResponse:
+        """Start cleaning via clean/start_clean (the protocol the app uses).
+
+        Args:
+            mode: Cleaning mode. None uses VACUUM_AND_MOP.
+            room_ids: Room IDs to clean. If empty/None, cleans all known rooms.
+            fan_level: Suction power level.
+            mop_humidity: Mop wetness level.
+        """
+        effective_mode = mode or CleanMode.VACUUM_AND_MOP
+
+        await self.notify_active()
+
+        if not room_ids:
+            room_ids = [r.room_id for r in self.state.rooms] if self.state.rooms else []
+        if not room_ids:
+            _LOGGER.warning("No room IDs available — fetching map first")
+            await self.fetch_rooms()
+            room_ids = [r.room_id for r in self.state.rooms] if self.state.rooms else []
+        if not room_ids:
+            raise NarwalCommandError("Cannot start clean: no rooms discovered")
+
+        payload = self._build_clean_payload(room_ids, effective_mode, fan_level, mop_humidity)
+        return await self.send_command(TOPIC_CMD_START_CLEAN, payload_override=payload)
 
     async def start_plan(
         self,
         mode: CleanMode | None = None,
         room_ids: list[int] | None = None,
     ) -> CommandResponse:
-        """Start a cleaning plan.
-
-        Args:
-            mode: Cleaning mode (vacuum+mop, vacuum only, etc.).
-                  None uses the vacuum's current default.
-            room_ids: List of room IDs to clean.  None cleans all rooms.
-        """
-        extra_inner = b""
-        if mode is not None:
-            extra_inner += _make_protobuf_varint(3, mode.value)
-        if room_ids:
-            for rid in room_ids:
-                extra_inner += _make_protobuf_varint(4, rid)
-
-        if extra_inner:
-            payload = self._build_user_payload(extra_inner)
-            return await self.send_command(TOPIC_CMD_START_PLAN, payload_override=payload)
-        return await self.send_command(TOPIC_CMD_START_PLAN)
+        """Start a cleaning plan — delegates to start_clean."""
+        return await self.start_clean(mode=mode, room_ids=room_ids)
 
     async def easy_clean(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_EASY_CLEAN)
+        return await self.start_clean()
 
     async def pause(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_PAUSE)

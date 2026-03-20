@@ -22,7 +22,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up Narwal button entities."""
     coordinator = entry.runtime_data
-    async_add_entities([NarwalLocateButton(coordinator)])
+    async_add_entities([
+        NarwalLocateButton(coordinator),
+        NarwalWakeButton(coordinator),
+    ])
 
 
 class NarwalLocateButton(NarwalEntity, ButtonEntity):
@@ -42,3 +45,21 @@ class NarwalLocateButton(NarwalEntity, ButtonEntity):
         resp = await self.coordinator.client.locate()
         if not resp.success:
             _LOGGER.warning("Locate returned code=%s", resp.result_code)
+
+
+class NarwalWakeButton(NarwalEntity, ButtonEntity):
+    """Wake the vacuum from sleep by sending an active_robot notification."""
+
+    _attr_translation_key = "wake"
+    _attr_icon = "mdi:power"
+
+    def __init__(self, coordinator: NarwalCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.data['device_name']}_wake"
+        )
+
+    async def async_press(self) -> None:
+        """Send active_robot_publish to wake the vacuum."""
+        await self.coordinator.client.notify_active()
+        _LOGGER.info("Sent wake (active_robot) notification")

@@ -192,18 +192,52 @@ can run concurrently without issues.
 
 | Topic                          | Timeout | Description                           |
 |--------------------------------|---------|---------------------------------------|
-| `clean/start_clean`            | 10s     | Start cleaning (returns NOT_APPLICABLE on Freo X Ultra — use `clean/plan/start` instead) |
-| `clean/plan/start`             | 10s     | Start a cleaning plan (works on Freo X Ultra) |
+| `clean/start_clean`            | 10s     | Start cleaning (requires clean config payload OUTSIDE the Narwal frame) |
+| `clean/plan/start`             | 10s     | Legacy plan start (returns NOT_APPLICABLE — use `clean/start_clean` instead) |
 | `clean/easy_clean/start`       | 10s     | Start easy/quick clean                |
 | `clean/set_fan_level`          | 10s     | Set vacuum fan speed                  |
 | `clean/set_mop_humidity`       | 10s     | Set mop wetness level                 |
 | `clean/current_clean_task/get` | 10s     | Get current cleaning task info        |
 
-**`clean/plan/start` payload** (extra fields inside the Narwal frame):
-- Field 3 (varint): CleanMode enum (1-4)
-- Field 4 (varint, repeated): room_id for each room to clean
+**`clean/start_clean` payload** — the auth frame is sent first, then a clean
+configuration protobuf is appended **OUTSIDE** (after) the Narwal frame:
 
-If no fields are provided, the vacuum uses its last-known settings from the app.
+```
+[Narwal frame: 0x01 + varint_len + auth_protobuf]
+[Clean config protobuf (field 1 sub-message)]
+```
+
+The clean config structure (field numbers relative to the outer message):
+```
+field 1 (sub-message) {           // CleanConfig
+  field 1 = 1                     // selective clean flag
+  field 2 (sub-message) {         // RoomList
+    field 1 (sub-message) {       // GlobalConfig: {1:1, 2:passes}
+      field 1 = 1
+      field 2 = <passes>          // number of cleaning passes (default: 2)
+    }
+    field 2 (sub-message, repeated) {  // RoomEntry (one per room)
+      field 1 = <room_id>
+      field 2 = <passes>
+      field 3 = <vacuum_on>       // 1=on, 0=off
+      field 4 = <mop_on>          // 1=on, 2=off
+      field 5 = <fan_level>       // 0=quiet, 1=normal, 2=strong, 3=max
+      field 6 = <mop_humidity>    // 0=dry, 1=normal, 2=wet
+      field 7 = 1
+      field 8 = 1
+      field 9 = 1
+      field 10 = 0
+    }
+    field 3 = 1
+  }
+  field 3 = 1
+  field 4 (sub-message) { field 1=1, field 5=0 }
+  field 5 = 1
+}
+```
+
+`clean/plan/start` is **not recommended** — it returns NOT_APPLICABLE (code=2)
+on Freo X Ultra and likely other newer models.
 
 ### Dock/Supply
 
@@ -536,9 +570,8 @@ numbers. For fields that appear multiple times (like room entries in field
 ### Entity Architecture
 
 - **VacuumEntity**: Main entity with start/stop/pause/locate/return_home.
-  Uses `clean/plan/start` (not `clean/start_clean` which returns
-  NOT_APPLICABLE on Freo X Ultra). Room list exposed via
-  `extra_state_attributes["rooms"]`.
+  Uses `clean/start_clean` with room-specific payload matching the Narwal
+  app's protocol. Room list exposed via `extra_state_attributes["rooms"]`.
 - **CameraEntity**: Map rendering. Fetches map every 120s (cached),
   renders via `map_renderer.render_map()` in executor.
 - **SelectEntity**: Clean mode selector (Vacuum & Mop, Vacuum Only, etc.).
@@ -585,8 +618,9 @@ Uses `hass.http.async_register_static_paths` with `StaticPathConfig` (HA
 1. **Device name vs device ID**: The #1 cause of "everything times out".
    MQTT device_name is a 32-char hex string, NOT the numeric cloud ID.
 
-2. **`clean/start_clean` doesn't work**: Returns `NOT_APPLICABLE` (code=2)
-   on Freo X Ultra. Use `clean/plan/start` instead.
+2. **`clean/start_clean` requires a special payload**: The clean configuration
+   must be appended OUTSIDE (after) the Narwal auth frame, not inside it.
+   Without this payload, the vacuum returns NOT_APPLICABLE (code=2).
 
 3. **Repeated protobuf fields**: Room data (field 12) is repeated. A naive
    parser that overwrites on duplicate field numbers will only keep the
