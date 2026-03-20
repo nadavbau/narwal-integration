@@ -452,33 +452,33 @@ class NarwalClient:
 
         The Narwal frame (auth) comes first, then a clean configuration
         protobuf is appended OUTSIDE the frame.
+
+        The room_id goes in the global config (field 1, sub-field 2),
+        NOT in the room entry. The room entry contains cleaning parameters
+        like passes, vacuum/mop on/off, fan level, etc.
         """
         vacuum_on = mode in (CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP, CleanMode.VACUUM_ONLY)
         mop_on = mode in (CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP, CleanMode.MOP_ONLY)
 
-        global_config = _make_protobuf_varint(1, 1) + _make_protobuf_varint(2, passes)
-
-        room_entries = b""
-        for rid in room_ids:
-            entry = (
-                _make_protobuf_varint(1, rid)
-                + _make_protobuf_varint(2, passes)
-                + _make_protobuf_varint(3, 1 if vacuum_on else 0)
-                + _make_protobuf_varint(4, 1 if mop_on else 2)
-                + _make_protobuf_varint(5, fan_level.value)
-                + _make_protobuf_varint(6, mop_humidity.value)
-                + _make_protobuf_varint(7, 1)
-                + _make_protobuf_varint(8, 1)
-                + _make_protobuf_varint(9, 1)
-                + _make_protobuf_varint(10, 0)
-            )
-            room_entries += _make_protobuf_string(2, entry)
-
-        room_list = (
-            _make_protobuf_string(1, global_config)
-            + room_entries
-            + _make_protobuf_varint(3, 1)
+        room_config = (
+            _make_protobuf_varint(1, passes)
+            + _make_protobuf_varint(2, passes)
+            + _make_protobuf_varint(3, 1 if vacuum_on else 0)
+            + _make_protobuf_varint(4, 1 if mop_on else 2)
+            + _make_protobuf_varint(5, fan_level.value)
+            + _make_protobuf_varint(6, mop_humidity.value)
+            + _make_protobuf_varint(7, 1)
+            + _make_protobuf_varint(8, 1)
+            + _make_protobuf_varint(9, 1)
+            + _make_protobuf_varint(10, 0)
         )
+
+        room_list = b""
+        for rid in room_ids:
+            global_config = _make_protobuf_varint(1, 1) + _make_protobuf_varint(2, rid)
+            room_list += _make_protobuf_string(1, global_config)
+            room_list += _make_protobuf_string(2, room_config)
+        room_list += _make_protobuf_varint(3, 1)
 
         clean_config = (
             _make_protobuf_varint(1, 1)
