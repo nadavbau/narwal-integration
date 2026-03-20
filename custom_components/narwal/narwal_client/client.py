@@ -34,6 +34,8 @@ from .const import (
     TOPIC_CMD_START_CLEAN,
     TOPIC_CMD_START_PLAN,
     TOPIC_CMD_YELL,
+    TOPIC_ROBOT_BASE_STATUS,
+    TOPIC_WORKING_STATUS,
     CleanMode,
     FanLevel,
     MopHumidity,
@@ -234,9 +236,16 @@ class NarwalClient:
             reason_code, self.base_topic, self.device_name,
         )
         if str(reason_code) == "Success" or reason_code == 0:
-            topic = f"{self.base_topic}/#"
-            client.subscribe(topic, qos=1)
-            _LOGGER.info("Subscribed to %s", topic)
+            # Narwal's Aliyun IoT broker only routes messages to EXPLICIT
+            # subscriptions — wildcard subs are accepted but don't deliver.
+            # Subscribe to each broadcast topic the vacuum pushes.
+            broadcast_topics = [
+                f"{self.base_topic}/{TOPIC_ROBOT_BASE_STATUS}",
+                f"{self.base_topic}/{TOPIC_WORKING_STATUS}",
+            ]
+            for bt in broadcast_topics:
+                client.subscribe(bt, qos=1)
+                _LOGGER.info("Subscribed to broadcast: %s", bt)
             self._connected.set()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
@@ -340,6 +349,16 @@ class NarwalClient:
         response_topic = f"{topic}/response"
         request_id = str(uuid.uuid1())
 
+        # Narwal's Aliyun IoT broker only routes messages to explicit
+        # subscriptions — the wildcard doesn't deliver.  Subscribe to
+        # the specific response topic and wait for SUBACK before publishing.
+        sub_event = threading.Event()
+        result_sub = self._client.subscribe(response_topic, qos=1)
+        self._pending_subacks[result_sub[1]] = sub_event
+        if not sub_event.wait(timeout=5.0):
+            self._pending_subacks.pop(result_sub[1], None)
+            _LOGGER.warning("SUBACK timeout for %s", response_topic)
+
         response_event = threading.Event()
         response_holder: list[bytes | None] = [None]
         self._pending_responses[response_topic] = (response_event, response_holder)
@@ -351,8 +370,8 @@ class NarwalClient:
             payload = self._build_user_payload() + extra_payload
         result = self._client.publish(topic, payload, qos=1, properties=props)
         _LOGGER.debug(
-            "Published >> %s | full_topic=%s | response_topic=%s | rc=%s mid=%s",
-            command, topic, response_topic, result.rc, result.mid,
+            "Published >> %s | response_topic=%s | rc=%s mid=%s",
+            command, response_topic, result.rc, result.mid,
         )
 
         if not response_event.wait(timeout=timeout):

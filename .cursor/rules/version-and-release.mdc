@@ -13,7 +13,7 @@ the manifest version against the GitHub release tag.
 
 ## Push Command
 
-The `GH_TOKEN` env var is set to a different GitHub account (`nadav13`).
+The `GH_TOKEN` env var may be set to a different GitHub account.
 Always push with it unset:
 
 ```bash
