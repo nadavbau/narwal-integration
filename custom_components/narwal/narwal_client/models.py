@@ -97,21 +97,20 @@ class NarwalState:
                         raw_status, sub,
                     )
                     self.working_status = WorkingStatus.UNKNOWN
-            self.is_paused = self.working_status == WorkingStatus.PAUSED
-            self.is_returning = sub.get(7, 0) == 1
-            self.is_docked = sub.get(10, 0) == 1
 
+        # Derive boolean flags from working_status (always, not just when
+        # field 3 is present) so they stay in sync even if field 3 parsing
+        # fails due to protobuf format variations.
+        self.is_paused = self.working_status == WorkingStatus.PAUSED
         self.is_cleaning = self.working_status in (
             WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT
         )
-        if self.working_status == WorkingStatus.RETURNING:
-            self.is_returning = True
-        if self.working_status in (
+        self.is_returning = self.working_status == WorkingStatus.RETURNING
+        self.is_docked = self.working_status in (
             WorkingStatus.DOCKED, WorkingStatus.CHARGED,
             WorkingStatus.CHARGING, WorkingStatus.MOP_WASHING,
             WorkingStatus.MOP_DRYING, WorkingStatus.DUST_COLLECTING,
-        ):
-            self.is_docked = True
+        )
         self.device_reachable = True
         _LOGGER.info(
             "State update: status=%s battery=%.1f%% cleaning=%s paused=%s returning=%s docked=%s",

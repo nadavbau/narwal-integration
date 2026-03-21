@@ -83,15 +83,6 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         if state is None:
             return VacuumActivity.IDLE
 
-        if state.is_paused:
-            return VacuumActivity.PAUSED
-        if state.is_returning:
-            return VacuumActivity.RETURNING
-        if state.is_cleaning:
-            return VacuumActivity.CLEANING
-        if state.is_docked:
-            return VacuumActivity.DOCKED
-
         return WORKING_STATUS_TO_ACTIVITY.get(
             state.working_status, VacuumActivity.IDLE
         )
