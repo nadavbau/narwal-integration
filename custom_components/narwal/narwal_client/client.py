@@ -618,14 +618,17 @@ class NarwalClient:
             raise
 
     async def disconnect(self) -> None:
-        """Disconnect from MQTT broker."""
+        """Disconnect from MQTT broker.
+
+        Does NOT flip device_reachable / fire a notification: the only
+        callers are (a) planned reconnects, which call connect() right
+        after, and (b) HA unload, which is tearing entities down. For
+        unexpected broker-side disconnects, _on_disconnect still fires
+        and handles the availability change.
+        """
         client = self._client
         self._client = None
         self._connected.clear()
-        # We null the disconnect callback before tearing down paho, so
-        # set reachability and notify here instead of relying on _on_disconnect.
-        self.state.device_reachable = False
-        self._notify_state_update()
         if client:
             client.on_connect = None
             client.on_message = None

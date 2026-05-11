@@ -177,7 +177,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         _LOGGER.info("Narwal access token updated")
 
     async def _reconnect_with_fresh_token(self) -> None:
-        """Full reconnect cycle: refresh token, disconnect, reconnect."""
+        """Full reconnect cycle: refresh token, disconnect, reconnect.
+
+        disconnect() no longer flips availability, so the entity stays
+        in its last-known state during the brief disconnect→connect
+        window. If reconnect fails outright, flip to unavailable here.
+        """
         _LOGGER.warning(
             "Forcing token refresh + reconnect after %d consecutive failures",
             self._consecutive_failures,
@@ -192,6 +197,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             _LOGGER.warning("Reconnected successfully with fresh token")
         except Exception:
             _LOGGER.error("Reconnect failed", exc_info=True)
+            self.client.state.device_reachable = False
+            self.async_set_updated_data(self.client.state)
 
     def _on_state_update(self, state: NarwalState) -> None:
         """Handle state updates from MQTT."""
