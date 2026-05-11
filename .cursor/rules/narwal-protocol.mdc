@@ -28,11 +28,17 @@ command failures and force token refresh + reconnect after 3 failures.
   cleaned_area (field 13). Does NOT contain WorkingStatus enum. Sent only
   during active cleaning.
 
-## Wildcard Subscription
+## Explicit Subscriptions Only
 
-`_on_connect` subscribes to `base_topic/#` which covers all response topics.
-Per-command subscribes are redundant — don't add them. They add latency
-(SUBACK wait) and unnecessary broker overhead.
+Narwal's Aliyun IoT broker accepts wildcard subscriptions (e.g. `base_topic/#`)
+but does NOT route messages through them — only EXPLICIT topic subscriptions
+get messages delivered.
+
+- `_on_connect` subscribes to each broadcast topic individually
+  (`status/robot_base_status`, `status/working_status`).
+- `_send_command_locked` subscribes to the specific `{topic}/response`
+  before each publish and waits briefly for SUBACK. Do not remove these
+  per-command subscribes — without them responses won't arrive.
 
 ## Map Data
 
