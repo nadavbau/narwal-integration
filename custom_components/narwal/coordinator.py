@@ -231,6 +231,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if needs_reconnect:
             await self._reconnect_with_fresh_token()
 
+        # Availability is driven by MQTT connection state (set in the
+        # client's connect/disconnect callbacks), not by command success.
+        # A vacuum in deep sleep is reachable-but-quiet, not unreachable.
+        # Failure tracking here only drives the periodic reconnect.
         if self.client.connected:
             try:
                 await self.client.notify_active()
@@ -242,19 +246,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 self._consecutive_failures = 0
             except NarwalCommandError:
                 self._consecutive_failures += 1
-                # Deep sleep is expected for an idle vacuum — don't flap the
-                # entity to "unavailable" on a single timeout. Only mark
-                # unreachable once we've crossed the reconnect threshold.
-                if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    self.client.state.device_reachable = False
                 _LOGGER.warning(
                     "Status poll failed (%d/%d before reconnect)",
                     self._consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                 )
         else:
             self._consecutive_failures += 1
-            if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                self.client.state.device_reachable = False
             _LOGGER.warning("MQTT not connected, failure count: %d", self._consecutive_failures)
 
         self._adjust_poll_interval()

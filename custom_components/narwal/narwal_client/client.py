@@ -247,6 +247,8 @@ class NarwalClient:
                 rc, mid = client.subscribe(bt, qos=1)
                 _LOGGER.debug("Subscribed to broadcast: %s (rc=%s mid=%s)", bt, rc, mid)
             self._connected.set()
+            self.state.device_reachable = True
+            self._notify_state_update()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
 
@@ -289,6 +291,8 @@ class NarwalClient:
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         _LOGGER.warning("MQTT disconnected: %s", reason_code)
         self._connected.clear()
+        self.state.device_reachable = False
+        self._notify_state_update()
 
     def _notify_state_update(self):
         """Schedule a state update callback on the event loop (if available)."""
@@ -618,6 +622,10 @@ class NarwalClient:
         client = self._client
         self._client = None
         self._connected.clear()
+        # We null the disconnect callback before tearing down paho, so
+        # set reachability and notify here instead of relying on _on_disconnect.
+        self.state.device_reachable = False
+        self._notify_state_update()
         if client:
             client.on_connect = None
             client.on_message = None
