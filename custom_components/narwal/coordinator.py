@@ -32,11 +32,20 @@ from .narwal_client import (
     NarwalConnectionError,
     NarwalState,
 )
+from .narwal_client.const import WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
-POLL_INTERVAL = timedelta(seconds=60)
+POLL_INTERVAL_ACTIVE = timedelta(seconds=60)
+POLL_INTERVAL_IDLE = timedelta(minutes=5)
 MAX_CONSECUTIVE_FAILURES = 3
+
+IDLE_STATUSES = frozenset({
+    WorkingStatus.SLEEPING,
+    WorkingStatus.CHARGING,
+    WorkingStatus.DOCKED,
+    WorkingStatus.CHARGED,
+})
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -49,7 +58,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=POLL_INTERVAL,
+            update_interval=POLL_INTERVAL_ACTIVE,
         )
         self.config_entry = entry
         self._cloud: NarwalCloud | None = None
@@ -187,7 +196,28 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     def _on_state_update(self, state: NarwalState) -> None:
         """Handle state updates from MQTT."""
         self._consecutive_failures = 0
+        self._adjust_poll_interval()
         self.async_set_updated_data(state)
+
+    def _adjust_poll_interval(self) -> None:
+        """Switch between active/idle poll cadence based on last-known status.
+
+        When the vacuum is docked/sleeping, polls just time out (the device
+        doesn't process commands in deep sleep), so we back off to reduce
+        radio traffic. Push broadcasts still arrive in real time when the
+        vacuum wakes, so we'll switch back to active cadence on next push.
+        """
+        new_interval = (
+            POLL_INTERVAL_IDLE
+            if self.client.state.working_status in IDLE_STATUSES
+            else POLL_INTERVAL_ACTIVE
+        )
+        if self.update_interval != new_interval:
+            _LOGGER.info(
+                "Poll interval -> %s (status=%s)",
+                new_interval, self.client.state.working_status.name,
+            )
+            self.update_interval = new_interval
 
     async def _async_update_data(self) -> NarwalState:
         """Poll for status (backup for push updates)."""
@@ -212,16 +242,22 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 self._consecutive_failures = 0
             except NarwalCommandError:
                 self._consecutive_failures += 1
-                self.client.state.device_reachable = False
+                # Deep sleep is expected for an idle vacuum — don't flap the
+                # entity to "unavailable" on a single timeout. Only mark
+                # unreachable once we've crossed the reconnect threshold.
+                if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    self.client.state.device_reachable = False
                 _LOGGER.warning(
                     "Status poll failed (%d/%d before reconnect)",
                     self._consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                 )
         else:
             self._consecutive_failures += 1
-            self.client.state.device_reachable = False
+            if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                self.client.state.device_reachable = False
             _LOGGER.warning("MQTT not connected, failure count: %d", self._consecutive_failures)
 
+        self._adjust_poll_interval()
         return self.client.state
 
     async def async_shutdown(self) -> None:
