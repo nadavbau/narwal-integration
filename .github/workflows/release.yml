@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Get current version
         id: current
@@ -24,8 +24,17 @@ jobs:
 
       - name: Get previous version
         id: previous
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          version=$(git show HEAD~1:custom_components/narwal/manifest.json | jq -r '.version')
+          # Diff against the ref's state before this push (not HEAD~1) so that
+          # multi-commit pushes still detect a manifest bump even when the
+          # bump is not in the head commit.
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            version="0.0.0"
+          else
+            version=$(git show "$BEFORE_SHA:custom_components/narwal/manifest.json" | jq -r '.version')
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Create release
