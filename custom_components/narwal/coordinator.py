@@ -257,6 +257,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     "Status poll failed (%d/%d before reconnect)",
                     self._consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                 )
+
+            # Retry the map fetch if setup couldn't reach the vacuum.
+            # Without rooms, the Lovelace card has nothing to render.
+            if not self.client.state.rooms:
+                try:
+                    await self.client.fetch_rooms()
+                except NarwalCommandError:
+                    _LOGGER.debug("Room re-fetch still failing — will retry next poll")
         else:
             self._consecutive_failures += 1
             _LOGGER.warning("MQTT not connected, failure count: %d", self._consecutive_failures)
