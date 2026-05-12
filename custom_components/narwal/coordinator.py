@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -40,6 +41,13 @@ POLL_INTERVAL_ACTIVE = timedelta(seconds=60)
 POLL_INTERVAL_IDLE = timedelta(minutes=5)
 MAX_CONSECUTIVE_FAILURES = 3
 
+# The active_robot_publish payload tells the vacuum keepalive=60_000ms.
+# If we don't re-register within that window the vacuum drops us from
+# its push-broadcast list and stops sending state updates. Send a
+# keepalive on its own timer (independent of the adaptive poll cadence,
+# which may be 5 min). 50s leaves a small safety margin.
+KEEPALIVE_INTERVAL = timedelta(seconds=50)
+
 IDLE_STATUSES = frozenset({
     WorkingStatus.SLEEPING,
     WorkingStatus.CHARGING,
@@ -64,6 +72,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._cloud: NarwalCloud | None = None
         self.selected_clean_mode: CleanMode = CleanMode.VACUUM_AND_MOP
         self._consecutive_failures: int = 0
+        self._keepalive_unsub = None
 
         if CONF_ACCESS_TOKEN in entry.data:
             self._setup_from_cloud_config(entry)
@@ -135,6 +144,23 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         )
         self._consecutive_failures = 0
         self.async_set_updated_data(state)
+        self._start_keepalive()
+
+    def _start_keepalive(self) -> None:
+        """Schedule notify_active every 50s to stay on the vacuum's push list."""
+        if self._keepalive_unsub is not None:
+            return
+        self._keepalive_unsub = async_track_time_interval(
+            self.hass, self._send_keepalive, KEEPALIVE_INTERVAL
+        )
+
+    async def _send_keepalive(self, _now=None) -> None:
+        if not self.client.connected:
+            return
+        try:
+            await self.client.notify_active()
+        except Exception:
+            _LOGGER.debug("keepalive notify_active failed", exc_info=True)
 
     async def _reauth(self) -> None:
         """Re-authenticate: try token refresh first, fall back to full login."""
@@ -242,15 +268,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # client's connect/disconnect callbacks), not by command success.
         # A vacuum in deep sleep is reachable-but-quiet, not unreachable.
         # Failure tracking here only drives the periodic reconnect.
+        # notify_active is on its own 50s timer (_start_keepalive); no
+        # need to send it here.
+        status_ok = False
         if self.client.connected:
-            try:
-                await self.client.notify_active()
-            except Exception:
-                _LOGGER.debug("active_robot_publish failed", exc_info=True)
-
             try:
                 await self.client.request_status_update()
                 self._consecutive_failures = 0
+                status_ok = True
             except NarwalCommandError:
                 self._consecutive_failures += 1
                 _LOGGER.warning(
@@ -258,9 +283,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     self._consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                 )
 
-            # Retry the map fetch if setup couldn't reach the vacuum.
-            # Without rooms, the Lovelace card has nothing to render.
-            if not self.client.state.rooms:
+            # Only retry the map fetch when the vacuum is actually responsive.
+            # Otherwise we just burn 15s of the poll cycle waiting for a
+            # second timeout the camera is already (politely) chasing too.
+            if status_ok and not self.client.state.rooms:
                 try:
                     await self.client.fetch_rooms()
                 except NarwalCommandError:
@@ -274,4 +300,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def async_shutdown(self) -> None:
         """Disconnect MQTT."""
+        if self._keepalive_unsub is not None:
+            self._keepalive_unsub()
+            self._keepalive_unsub = None
         await self.client.disconnect()
