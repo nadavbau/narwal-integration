@@ -60,16 +60,19 @@ class NarwalMapCamera(NarwalEntity, Camera):
         cooldown = MAP_CACHE_SECONDS if self._consecutive_map_failures == 0 else MAP_FAILURE_COOLDOWN
         # Apply the cooldown even when we have no cached image yet —
         # otherwise every HA camera render request fires another get_map()
-        # before the previous one has finished failing, piling up calls
-        # every ~15s and starving the executor pool.
+        # before the previous one has finished failing.
         if self._last_fetch > 0.0 and now - self._last_fetch < cooldown:
             return self._last_image
 
+        # Set _last_fetch BEFORE awaiting get_map(). Multiple concurrent
+        # render requests would otherwise all see _last_fetch=0.0, all
+        # queue up a get_map() behind the per-command lock, and all time
+        # out one after the other every ~15s.
+        self._last_fetch = now
+
         try:
             resp = await self.coordinator.client.get_map()
-            self._last_fetch = now
         except Exception:
-            self._last_fetch = now
             self._consecutive_map_failures += 1
             _LOGGER.debug(
                 "Map fetch failed (attempt %d)", self._consecutive_map_failures,
@@ -78,7 +81,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
             return self._last_image
 
         if not resp.data:
-            self._last_fetch = now
             return self._last_image
 
         try:

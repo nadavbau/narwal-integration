@@ -84,9 +84,10 @@ class NarwalState:
                 self.battery_level = float(val)
 
         # Field 3 = mode/state sub-message
+        sub: dict = {}
+        prev_status = self.working_status
         if 3 in fields and isinstance(fields[3], bytes):
             sub = parse_protobuf_fields(fields[3])
-            _LOGGER.debug("Base status sub-fields: %s", sub)
             if 1 in sub and isinstance(sub[1], int):
                 raw_status = sub[1]
                 try:
@@ -111,10 +112,12 @@ class NarwalState:
             WorkingStatus.CHARGING, WorkingStatus.MOP_WASHING,
             WorkingStatus.MOP_DRYING, WorkingStatus.DUST_COLLECTING,
         )
-        _LOGGER.info(
-            "State update: status=%s battery=%.1f%% cleaning=%s paused=%s returning=%s docked=%s",
-            self.working_status.name, self.battery_level,
-            self.is_cleaning, self.is_paused, self.is_returning, self.is_docked,
+        # Log state transitions at WARNING so we can diagnose enum
+        # mismapping without asking the user to change log levels.
+        log = _LOGGER.warning if self.working_status != prev_status else _LOGGER.debug
+        log(
+            "State update: status=%s battery=%.1f%% sub_fields=%s",
+            self.working_status.name, self.battery_level, sub,
         )
 
     rooms: list[RoomInfo] = field(default_factory=list)
