@@ -99,6 +99,19 @@ class NarwalState:
                     )
                     self.working_status = WorkingStatus.UNKNOWN
 
+                # Disambiguate raw_status=2: this firmware reuses the
+                # PAUSED slot for any active task. Captured payloads
+                # during scheduled clean: {1: 2, 4: 8/7/3} with no
+                # is_paused flag (sub[2]). Use the explicit flags:
+                #   sub[2] = is_paused  (1 = actually paused)
+                #   sub[7] = is_returning (1 = en route to dock)
+                # Without either flag set, treat as CLEANING.
+                if self.working_status == WorkingStatus.PAUSED:
+                    if sub.get(7, 0) == 1:
+                        self.working_status = WorkingStatus.RETURNING
+                    elif sub.get(2, 0) != 1:
+                        self.working_status = WorkingStatus.CLEANING
+
         # Derive boolean flags from working_status (always, not just when
         # field 3 is present) so they stay in sync even if field 3 parsing
         # fails due to protobuf format variations.
