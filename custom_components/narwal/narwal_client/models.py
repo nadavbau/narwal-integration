@@ -133,7 +133,16 @@ class NarwalState:
         _LOGGER.debug("Parsed %d rooms from map data (field 12)", len(self.rooms))
 
     def update_working_status(self, payload: bytes) -> None:
-        """Update from working_status protobuf."""
+        """Update from working_status protobuf.
+
+        Per protocol, this push is sent only during active cleaning, so
+        treat receipt of one as an authoritative "vacuum is cleaning"
+        signal. Empirically some firmware sends a single
+        robot_base_status with sub_fields={1: 2, 4: 8} at the start of
+        a scheduled clean and no further base_status pushes until the
+        cycle ends — our enum maps 2 -> PAUSED, so without this
+        override the entity would show "Paused" for the entire cycle.
+        """
         fields = parse_protobuf_fields(payload)
         self.raw_working_status = fields
 
@@ -141,6 +150,22 @@ class NarwalState:
             self.elapsed_time = fields[3]
         if 13 in fields:
             self.cleaned_area = fields[13]
+
+        if self.working_status not in (
+            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
+            WorkingStatus.RETURNING,
+        ):
+            prev = self.working_status
+            self.working_status = WorkingStatus.CLEANING
+            self.is_paused = False
+            self.is_cleaning = True
+            self.is_docked = False
+            self.is_returning = False
+            _LOGGER.warning(
+                "Inferred CLEANING from working_status push "
+                "(was %s, elapsed=%ds, area=%dcm^2)",
+                prev.name, self.elapsed_time, self.cleaned_area,
+            )
 
 
 @dataclass

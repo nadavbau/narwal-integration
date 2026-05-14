@@ -19,7 +19,8 @@ from .narwal_client.models import parse_protobuf_fields
 _LOGGER = logging.getLogger(__name__)
 
 MAP_CACHE_SECONDS = 120
-MAP_FAILURE_COOLDOWN = 300
+MAP_FAILURE_COOLDOWN = 600  # 10 min — after a timeout, the vacuum is
+                            # usually mid-task and won't reply for a while.
 
 
 async def async_setup_entry(
@@ -56,11 +57,14 @@ class NarwalMapCamera(NarwalEntity, Camera):
         if not self.coordinator.client.connected:
             return self._last_image
 
+        # If the coordinator's status polls are already timing out, the
+        # vacuum is busy (mid-clean or asleep) and map/get_map will time
+        # out the same way — don't burn 15s on it.
+        if self.coordinator._consecutive_failures > 0:
+            return self._last_image
+
         now = time.monotonic()
         cooldown = MAP_CACHE_SECONDS if self._consecutive_map_failures == 0 else MAP_FAILURE_COOLDOWN
-        # Apply the cooldown even when we have no cached image yet —
-        # otherwise every HA camera render request fires another get_map()
-        # before the previous one has finished failing.
         if self._last_fetch > 0.0 and now - self._last_fetch < cooldown:
             return self._last_image
 
@@ -74,9 +78,9 @@ class NarwalMapCamera(NarwalEntity, Camera):
             resp = await self.coordinator.client.get_map()
         except Exception:
             self._consecutive_map_failures += 1
-            _LOGGER.debug(
-                "Map fetch failed (attempt %d)", self._consecutive_map_failures,
-                exc_info=True,
+            _LOGGER.warning(
+                "Map fetch failed (attempt %d, next try in %ds)",
+                self._consecutive_map_failures, MAP_FAILURE_COOLDOWN,
             )
             return self._last_image
 
