@@ -21,6 +21,7 @@ from .const import (
     CONF_PRODUCT_KEY,
     CONF_REFRESH_TOKEN,
     CONF_REGION,
+    CONF_ROOMS_CACHE,
     CONF_USER_UUID,
     DOMAIN,
 )
@@ -34,6 +35,7 @@ from .narwal_client import (
     NarwalState,
 )
 from .narwal_client.const import WorkingStatus
+from .narwal_client.models import RoomInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -115,6 +117,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.client.product_key,
             self.client.broker,
         )
+
+        # Restore cached rooms before connecting so start_clean works
+        # even if the vacuum is asleep and we can't fetch a fresh map.
+        cached = self.config_entry.data.get(CONF_ROOMS_CACHE, [])
+        if cached:
+            self.client.state.rooms = [RoomInfo(**r) for r in cached]
+            _LOGGER.info("Restored %d rooms from cache", len(cached))
+
         if self._cloud:
             _LOGGER.info(
                 "Token expired=%s, refreshing to ensure valid MQTT credentials",
@@ -132,6 +142,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         try:
             await self.client.fetch_rooms()
+            self._persist_rooms_cache()
         except NarwalCommandError:
             _LOGGER.warning("Initial room fetch timed out — will retry on next poll")
 
@@ -145,6 +156,27 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._consecutive_failures = 0
         self.async_set_updated_data(state)
         self._start_keepalive()
+
+    def _persist_rooms_cache(self) -> None:
+        """Save the current room list to the config entry data."""
+        rooms = self.client.state.rooms
+        if not rooms:
+            return
+        cache = [
+            {
+                "room_id": r.room_id,
+                "room_sub_type": r.room_sub_type,
+                "name": r.name,
+                "category": r.category,
+                "instance_index": r.instance_index,
+            }
+            for r in rooms
+        ]
+        if self.config_entry.data.get(CONF_ROOMS_CACHE) == cache:
+            return
+        new_data = {**self.config_entry.data, CONF_ROOMS_CACHE: cache}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        _LOGGER.info("Cached %d rooms to config entry", len(rooms))
 
     def _start_keepalive(self) -> None:
         """Schedule notify_active every 50s to stay on the vacuum's push list."""
@@ -289,6 +321,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             if status_ok and not self.client.state.rooms:
                 try:
                     await self.client.fetch_rooms()
+                    self._persist_rooms_cache()
                 except NarwalCommandError:
                     _LOGGER.debug("Room re-fetch still failing — will retry next poll")
         else:

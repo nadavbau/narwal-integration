@@ -21,6 +21,10 @@ CONF_MQTT_USERNAME = "mqtt_username"
 CONF_MQTT_PASSWORD = "mqtt_password"
 CONF_MQTT_CLIENT_ID = "mqtt_client_id"
 
+# Cached list of rooms (from the last successful map fetch). Persists
+# across HA restarts so start_clean works even if the vacuum is asleep.
+CONF_ROOMS_CACHE = "rooms_cache"
+
 REGION_OPTIONS = {
     "us": "United States",
     "il": "Israel",
