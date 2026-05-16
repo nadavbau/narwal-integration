@@ -70,7 +70,9 @@ class NarwalVacuumCardEditor extends HTMLElement {
   }
 }
 
-customElements.define("narwal-vacuum-card-editor", NarwalVacuumCardEditor);
+if (!customElements.get("narwal-vacuum-card-editor")) {
+  customElements.define("narwal-vacuum-card-editor", NarwalVacuumCardEditor);
+}
 
 /* ================================================================
  *  Main Card
@@ -460,10 +462,12 @@ class NarwalVacuumCard extends HTMLElement {
   }
 }
 
-customElements.define("narwal-vacuum-card", NarwalVacuumCard);
+if (!customElements.get("narwal-vacuum-card")) {
+  customElements.define("narwal-vacuum-card", NarwalVacuumCard);
+}
 
 window.customCards = window.customCards || [];
-window.customCards.push({
+if (!window.customCards.find((c) => c.type === "narwal-vacuum-card")) window.customCards.push({
   type: "narwal-vacuum-card",
   name: "Narwal Vacuum",
   description: "Control your Narwal vacuum with room selection, cleaning modes, and map",
