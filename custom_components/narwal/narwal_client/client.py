@@ -39,6 +39,8 @@ from .const import (
     CleanMode,
     FanLevel,
     MopHumidity,
+    get_fan_wire_value,
+
 )
 from .models import CommandResponse, NarwalState
 
@@ -469,7 +471,7 @@ class NarwalClient:
             + _make_protobuf_varint(2, passes)
             + _make_protobuf_varint(3, 1 if vacuum_on else 0)
             + _make_protobuf_varint(4, 1 if mop_on else 2)
-            + _make_protobuf_varint(5, fan_level.value)
+            + _make_protobuf_varint(5, get_fan_wire_value(self.product_key, fan_level))
             + _make_protobuf_varint(6, mop_humidity.value)
             + _make_protobuf_varint(7, 1)
             + _make_protobuf_varint(8, 1)
@@ -553,7 +555,8 @@ class NarwalClient:
         return await self.send_command(TOPIC_CMD_RECALL)
 
     async def set_fan_speed(self, level: FanLevel) -> CommandResponse:
-        extra = _make_protobuf_varint(1, level.value)
+        wire = get_fan_wire_value(self.product_key, level)
+        extra = _make_protobuf_varint(1, wire)
         return await self.send_command(TOPIC_CMD_SET_FAN_LEVEL, extra)
 
     async def set_mop_humidity(self, level: MopHumidity) -> CommandResponse:
@@ -711,3 +714,4 @@ class NarwalClient:
             client.disconnect()
 
         return discovered
+

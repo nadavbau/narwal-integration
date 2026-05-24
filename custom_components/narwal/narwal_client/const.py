@@ -79,10 +79,33 @@ class WorkingStatus(IntEnum):
 
 
 class FanLevel(IntEnum):
+    """Logical fan-level names used inside the integration.
+
+    The underlying wire-protocol value differs per model — see
+    FAN_LEVEL_WIRE_VALUES below. Do not use .value directly when
+    building MQTT payloads; use get_fan_wire_value(product_key, level).
+    """
     QUIET = 0
     NORMAL = 1
     STRONG = 2
     MAX = 3
+
+
+# Product keys known to use the "shifted" wire mapping (1..4 instead of 0..3).
+# Confirmed via MITM of the Narwal app on:
+#   - Freo Z (hEA7OEshlx) — captured 2026-05
+#
+# Mapping reference (sent payload last varint after the auth frame):
+#   Freo X Ultra (EHf6cRNRGT): 0=Quiet, 1=Normal, 2=Strong, 3=Max
+#   Freo Z       (hEA7OEshlx): 1=Quiet, 2=Normal, 3=Strong, 4=Max
+SHIFTED_FAN_MODELS = frozenset({"hEA7OEshlx"})
+
+
+def get_fan_wire_value(product_key: str, level: "FanLevel") -> int:
+    """Translate a logical FanLevel to the wire value for this model."""
+    if product_key in SHIFTED_FAN_MODELS:
+        return level.value + 1
+    return level.value
 
 
 class MopHumidity(IntEnum):
