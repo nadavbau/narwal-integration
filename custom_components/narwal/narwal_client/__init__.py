@@ -1,7 +1,14 @@
 """Narwal MQTT client library."""
 
 from .client import NarwalClient, NarwalConnectionError, NarwalCommandError
-from .cloud import NarwalCloud, NarwalCloudError, NarwalAuthError, NarwalCloudSession, NarwalDevice
+from .cloud import (
+    NarwalCloud,
+    NarwalCloudError,
+    NarwalAuthError,
+    NarwalCloudSession,
+    NarwalDevice,
+    NarwalDeviceInfo,
+)
 from .const import WorkingStatus, FanLevel, MopHumidity, CleanMode
 from .models import NarwalState, CommandResponse, RoomInfo
 
@@ -14,6 +21,7 @@ __all__ = [
     "NarwalAuthError",
     "NarwalCloudSession",
     "NarwalDevice",
+    "NarwalDeviceInfo",
     "NarwalState",
     "CommandResponse",
     "RoomInfo",

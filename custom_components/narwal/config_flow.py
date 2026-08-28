@@ -21,7 +21,12 @@ from .const import (
     DOMAIN,
     REGION_OPTIONS,
 )
-from .narwal_client import NarwalAuthError, NarwalCloud, NarwalCloudError
+from .narwal_client import (
+    NarwalAuthError,
+    NarwalCloud,
+    NarwalCloudError,
+    NarwalDeviceInfo,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +51,7 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         self._password: str = ""
         self._region: str = "us"
         self._cloud_devices: list[dict[str, str]] = []
+        self._device_infos: list[NarwalDeviceInfo] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -74,17 +80,28 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 self._cloud = cloud
 
-                # Get friendly names from cloud API for display
+                # Discover bound devices with their product key and MQTT
+                # device name so the next step can be pre-filled.
                 try:
-                    devices = await self.hass.async_add_executor_job(
-                        cloud.get_devices
+                    self._device_infos = await self.hass.async_add_executor_job(
+                        cloud.get_device_info_list
                     )
-                    self._cloud_devices = [
-                        {"device_id": d.device_id, "name": d.name}
-                        for d in devices
-                    ]
                 except Exception:
-                    _LOGGER.debug("Cloud device discovery failed")
+                    _LOGGER.debug("Cloud device info discovery failed", exc_info=True)
+                    self._device_infos = []
+
+                # Fall back to friendly names from device messages for display
+                if not self._device_infos:
+                    try:
+                        devices = await self.hass.async_add_executor_job(
+                            cloud.get_devices
+                        )
+                        self._cloud_devices = [
+                            {"device_id": d.device_id, "name": d.name}
+                            for d in devices
+                        ]
+                    except Exception:
+                        _LOGGER.debug("Cloud device discovery failed")
 
                 return await self.async_step_device()
 
@@ -122,12 +139,18 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             )
 
+        # Pre-fill with the first discovered device; the fields stay
+        # editable so a different device can still be entered manually.
+        default_product_key = "EHf6cRNRGT"
+        default_device_name: Any = vol.UNDEFINED
+        if self._device_infos:
+            default_product_key = self._device_infos[0].product_key
+            default_device_name = self._device_infos[0].device_name
+
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_PRODUCT_KEY, default="EHf6cRNRGT"
-                ): str,
-                vol.Required(CONF_DEVICE_NAME): str,
+                vol.Required(CONF_PRODUCT_KEY, default=default_product_key): str,
+                vol.Required(CONF_DEVICE_NAME, default=default_device_name): str,
             }
         )
 
@@ -141,19 +164,40 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     def _find_device_friendly_name(self, mqtt_device_name: str) -> str:
+        for info in self._device_infos:
+            if info.device_name == mqtt_device_name and info.name:
+                return info.name
         for d in self._cloud_devices:
             return d["name"]
         return mqtt_device_name[:8]
 
     def _format_discovered_devices(self) -> str:
+        if self._device_infos:
+            lines = ["Devices found on your account (pre-filled below):"]
+            for info in self._device_infos:
+                label = info.name or info.device_name[:8]
+                details = (
+                    f"product key `{info.product_key}`, "
+                    f"device name `{info.device_name}`"
+                )
+                if info.serial:
+                    details += f", S/N {info.serial}"
+                if info.firmware:
+                    details += f", firmware {info.firmware}"
+                lines.append(f"- **{label}**: {details}")
+            return "\n".join(lines)
         if self._cloud_devices:
             lines = ["Found devices:"]
             for d in self._cloud_devices:
                 lines.append(f"- **{d['name']}** (cloud ID: {d['device_id']})")
             lines.append(
                 "\nNote: The MQTT device name is a 32-character hex string, "
-                "**not** the cloud ID above. Use `test_mqtt.py` or the Narwal "
-                "app's MQTT traffic to find it."
+                "**not** the cloud ID above. Enter it manually; it can be found "
+                "in the Narwal app's network traffic."
             )
             return "\n".join(lines)
-        return "No devices found. Enter the MQTT device name (32-character hex string)."
+        return (
+            "No devices could be discovered on this account. Enter the MQTT "
+            "device name (32-character hex string) manually; it can be found "
+            "in the Narwal app's network traffic."
+        )

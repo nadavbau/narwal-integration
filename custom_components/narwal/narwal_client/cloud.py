@@ -31,6 +31,7 @@ LOGIN_PATH = "/user-authentication-server/v2/login/loginByEmail"
 REFRESH_PATH = "/user-authentication-server/v1/token/refresh"
 USER_INFO_PATH = "/user-server/v2/user/getUserInfo"
 DEVICE_MESSAGES_PATH = "/app-message-server/v1/device-message/listPage"
+DEVICE_INFO_PATH = "/user-device-platform-server/device-info/getDeviceInfoList"
 
 
 class NarwalCloudError(Exception):
@@ -48,6 +49,21 @@ class NarwalDevice:
     device_id: str
     name: str
     product_pic: str = ""
+
+
+@dataclass
+class NarwalDeviceInfo:
+    """A device bound to the account, as reported by the device-info endpoint.
+
+    ``device_name`` is the 32-character hex MQTT device name and
+    ``product_key`` the product ID; both are needed to build the MQTT topics.
+    """
+
+    device_name: str
+    product_key: str
+    serial: str = ""
+    name: str = ""
+    firmware: str = ""
 
 
 @dataclass
@@ -210,6 +226,41 @@ class NarwalCloud:
                 )
 
         return list(seen.values())
+
+    def get_device_info_list(self) -> list[NarwalDeviceInfo]:
+        """List the devices bound to the account with their MQTT identifiers.
+
+        Unlike get_devices(), this endpoint returns the product ID and the
+        32-character device ID used in the MQTT topics, so no manual lookup
+        is needed during setup.
+        """
+        resp = self._request("GET", DEVICE_INFO_PATH)
+        if resp.get("code") != 0:
+            _LOGGER.warning("Device info query failed: %s", resp.get("msg"))
+            return []
+
+        result = resp.get("result") or {}
+        items = result.get("deviceInfoList") if isinstance(result, dict) else result
+
+        devices: list[NarwalDeviceInfo] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            device_name = item.get("deviceId")
+            product_key = item.get("productId")
+            if not device_name or not product_key:
+                continue
+            devices.append(
+                NarwalDeviceInfo(
+                    device_name=str(device_name),
+                    product_key=str(product_key),
+                    serial=str(item.get("snNumber") or ""),
+                    name=str(item.get("robotName") or ""),
+                    firmware=str(item.get("firmwareVersion") or ""),
+                )
+            )
+
+        return devices
 
     def ensure_valid_token(self) -> str:
         """Return a valid access token, refreshing if needed."""

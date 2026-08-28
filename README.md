@@ -46,13 +46,13 @@ Other Narwal models using the same cloud platform should also work.
    - **Email** -- your Narwal app account email
    - **Password** -- your Narwal app account password
    - **Region** -- the region your account is registered in (US, Israel, Europe, or China)
-4. Enter your device details:
-   - **Product Key** -- the product key for your vacuum model (default `EHf6cRNRGT` for Freo X Ultra)
+4. Confirm your device details. The integration looks up the devices bound to your account and pre-fills the fields:
+   - **Product Key** -- the product key for your vacuum model (e.g. `EHf6cRNRGT` for Freo X Ultra)
    - **Device Name** -- your device's unique identifier (a 32-character hex string)
 
 ### Finding your Device Name
 
-The Device Name is the 32-character hex string that identifies your specific vacuum on the Narwal cloud. You can find it in the Narwal app's network traffic, or by checking the MQTT topics the vacuum subscribes to. It looks like: `abcdef1234567890abcdef1234567890`.
+The Product Key and Device Name are discovered automatically from your Narwal account during setup, so you normally don't need to look them up. If discovery fails (for example, the device list endpoint is unavailable in your region), you can still find the Device Name in the Narwal app's network traffic or in the MQTT topics the vacuum subscribes to. It looks like: `abcdef1234567890abcdef1234567890`.
 
 ## Entities
 

@@ -12,7 +12,7 @@
       },
       "device": {
         "title": "Device Selection",
-        "description": "Enter your vacuum's Product Key and Device Name.\n\n{discovered_devices}",
+        "description": "The Product Key and Device Name are discovered from your Narwal account when possible and pre-filled below. If no device was found, enter them manually: the Device Name is the 32-character hex device ID your vacuum uses on the Narwal cloud.\n\n{discovered_devices}",
         "data": {
           "product_key": "Product Key",
           "device_name": "Device Name (device ID)"
