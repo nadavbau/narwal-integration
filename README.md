@@ -20,6 +20,7 @@ A custom Home Assistant integration for **Narwal** robot vacuums (Freo X Ultra a
 This integration has been tested with:
 
 - Narwal Freo X Ultra
+- Narwal Freo Z Ultra (product key `hEA7OEshlx`) -- uses `supply/wash_and_dry_mop` for mop washing, and Return to Base success is inferred because the robot never answers `supply/recall`
 
 Other Narwal models using the same cloud platform should also work.
 
@@ -75,6 +76,16 @@ The Device Name is the 32-character hex string that identifies your specific vac
 | Status | Working status (Standby, Cleaning, Docked, Charged, Error) |
 | Cleaning Time | Elapsed time of the current/last cleaning session |
 | Cleaned Area | Area covered in the current/last cleaning session |
+
+### Buttons
+
+| Button | Description |
+|--------|-------------|
+| Locate | Make the vacuum beep |
+| Wake | Wake the vacuum from sleep |
+| Wash Mop | Wash the mop pads at the dock (available while docked) |
+| Dry Mop | Dry the mop pads at the dock (available while docked) |
+| Empty Dustbin | Empty the dustbin into the dock (available while docked) |
 
 ## Architecture
 

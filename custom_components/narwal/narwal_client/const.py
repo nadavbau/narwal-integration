@@ -7,6 +7,9 @@ MQTT_PORT = 8883
 
 COMMAND_RESPONSE_TIMEOUT = 10.0
 
+# Product keys for the Freo Z Ultra, whose supply/* commands differ from the X Ultra
+ZULTRA_PRODUCT_KEYS = frozenset({"hEA7OEshlx"})
+
 # --- Command topics (client → robot) ---
 TOPIC_CMD_YELL = "common/yell"
 TOPIC_CMD_REBOOT = "common/reboot"
@@ -26,6 +29,8 @@ TOPIC_CMD_CANCEL = "task/cancel"
 # Supply/dock
 TOPIC_CMD_RECALL = "supply/recall"
 TOPIC_CMD_WASH_MOP = "supply/wash_mop"
+# What the app's "Mop washing" button sends on the Freo Z Ultra (wash_mop is NOT_APPLICABLE there)
+TOPIC_CMD_WASH_AND_DRY_MOP = "supply/wash_and_dry_mop"
 TOPIC_CMD_DRY_MOP = "supply/dry_mop"
 TOPIC_CMD_DUST_GATHERING = "supply/dust_gathering"
 

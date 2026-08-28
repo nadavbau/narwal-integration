@@ -19,6 +19,8 @@ from .const import (
     MQTT_BROKER,
     MQTT_PORT,
     TOPIC_CMD_ACTIVE_ROBOT,
+    TOPIC_CMD_DRY_MOP,
+    TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_EASY_CLEAN,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_BASE_STATUS,
@@ -33,9 +35,12 @@ from .const import (
     TOPIC_CMD_SET_MOP_HUMIDITY,
     TOPIC_CMD_START_CLEAN,
     TOPIC_CMD_START_PLAN,
+    TOPIC_CMD_WASH_AND_DRY_MOP,
+    TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_YELL,
     TOPIC_ROBOT_BASE_STATUS,
     TOPIC_WORKING_STATUS,
+    ZULTRA_PRODUCT_KEYS,
     CleanMode,
     FanLevel,
     MopHumidity,
@@ -549,8 +554,39 @@ class NarwalClient:
     async def stop(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_FORCE_END)
 
+    async def _recall_without_response(self) -> CommandResponse:
+        """supply/recall on the Freo Z Ultra executes but never publishes a
+        /response (issue #5), so the command is published without waiting and
+        success is inferred; the robot's reaction shows up in the
+        status/robot_base_status broadcasts.
+        """
+        await self.send_command_no_response(TOPIC_CMD_RECALL)
+        return CommandResponse(result_code=1, success=True)
+
     async def return_to_base(self) -> CommandResponse:
+        if self.product_key in ZULTRA_PRODUCT_KEYS:
+            return await self._recall_without_response()
         return await self.send_command(TOPIC_CMD_RECALL)
+
+    async def wash_mop(self) -> CommandResponse:
+        """Start washing the mop pads at the dock.
+
+        The robot answers result 2 (NOT_APPLICABLE) if a wash is requested
+        while the base is already drying.
+        """
+        if self.product_key in ZULTRA_PRODUCT_KEYS:
+            # The app's "Mop washing" publishes supply/wash_and_dry_mop on the
+            # Z Ultra; supply/wash_mop answers result 2 (NOT_APPLICABLE) there.
+            return await self.send_command(TOPIC_CMD_WASH_AND_DRY_MOP)
+        return await self.send_command(TOPIC_CMD_WASH_MOP)
+
+    async def dry_mop(self) -> CommandResponse:
+        """Start drying the mop pads at the dock."""
+        return await self.send_command(TOPIC_CMD_DRY_MOP)
+
+    async def empty_dustbin(self) -> CommandResponse:
+        """Have the dock empty the robot's dustbin."""
+        return await self.send_command(TOPIC_CMD_DUST_GATHERING)
 
     async def set_fan_speed(self, level: FanLevel) -> CommandResponse:
         extra = _make_protobuf_varint(1, level.value)

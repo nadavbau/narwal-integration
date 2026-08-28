@@ -54,6 +54,15 @@
       },
       "wake": {
         "name": "Wake"
+      },
+      "wash_mop": {
+        "name": "Wash Mop"
+      },
+      "dry_mop": {
+        "name": "Dry Mop"
+      },
+      "empty_dustbin": {
+        "name": "Empty Dustbin"
       }
     },
     "camera": {
