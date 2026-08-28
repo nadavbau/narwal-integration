@@ -259,8 +259,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.async_set_updated_data(self.client.state)
 
     def _on_state_update(self, state: NarwalState) -> None:
-        """Handle state updates from MQTT."""
-        self._consecutive_failures = 0
+        """Handle state updates from MQTT.
+
+        Deliberately does NOT reset ``_consecutive_failures``: a chatty robot
+        broadcasting state proves the *subscribe* side works, not that our
+        publishes reach the broker. Only a successful poll clears it.
+        """
         self._adjust_poll_interval()
         self.async_set_updated_data(state)
 
@@ -299,7 +303,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # Availability is driven by MQTT connection state (set in the
         # client's connect/disconnect callbacks), not by command success.
         # A vacuum in deep sleep is reachable-but-quiet, not unreachable.
-        # Failure tracking here only drives the periodic reconnect.
+        # Failure tracking counts consecutive *poll* failures; broadcasts do
+        # not clear it (only a successful request_status_update does). It
+        # only drives the periodic reconnect.
         # notify_active is on its own 50s timer (_start_keepalive); no
         # need to send it here.
         status_ok = False

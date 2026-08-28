@@ -373,7 +373,10 @@ class NarwalClient:
             payload = payload_override
         else:
             payload = self._build_user_payload() + extra_payload
-        result = self._client.publish(topic, payload, qos=1, properties=props)
+        # QoS 0 on purpose: Narwal's broker never PUBACKs app publishes; at
+        # QoS 1 paho stops transmitting after 20 un-acked messages
+        # (max_inflight).
+        result = self._client.publish(topic, payload, qos=0, properties=props)
         _LOGGER.debug(
             "Published >> %s | response_topic=%s | rc=%s mid=%s",
             command, response_topic, result.rc, result.mid,
@@ -404,7 +407,20 @@ class NarwalClient:
             payload = payload_override
         else:
             payload = self._build_user_payload() + extra_payload
-        self._client.publish(topic, payload, qos=1, properties=props)
+        # QoS 0 on purpose: Narwal's broker never PUBACKs app publishes; at
+        # QoS 1 paho stops transmitting after 20 un-acked messages
+        # (max_inflight).
+        result = self._client.publish(topic, payload, qos=0, properties=props)
+        if result.rc != 0:
+            _LOGGER.warning(
+                "Publish (no-response) FAILED >> %s | rc=%s mid=%s",
+                command, result.rc, result.mid,
+            )
+        else:
+            _LOGGER.debug(
+                "Published (no-response) >> %s | rc=%s mid=%s",
+                command, result.rc, result.mid,
+            )
 
     # --- High-level commands ---
 
