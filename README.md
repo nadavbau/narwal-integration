@@ -123,6 +123,15 @@ The integration authenticates using the same API as the official Narwal mobile a
 - Home Assistant 2024.1.0+
 - `paho-mqtt` >= 2.0.0
 
+### Tests
+
+The tests run the real integration inside Home Assistant against a fake robot that answers with protocol-correct messages:
+
+```bash
+pip install -r requirements_test.txt
+pytest
+```
+
 ### Project Structure
 
 ```
