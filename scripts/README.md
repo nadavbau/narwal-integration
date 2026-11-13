@@ -24,10 +24,14 @@ The scripts read `scripts/.env` automatically (values already in the environment
 | `NARWAL_EMAIL` | Yes | Narwal account email |
 | `NARWAL_PASSWORD` | Yes | Narwal account password |
 | `NARWAL_REGION` | No | API region: `us`, `il`, `eu`, `cn` (default: `il`) |
-| `NARWAL_DEVICE_ID` | Yes | Device hex ID (32-char hex string from MQTT topic) |
-| `NARWAL_PRODUCT_KEY` | Yes | Product key (from MQTT topic path) |
+| `NARWAL_DEVICE_ID` | No | MQTT device name (32-char hex). Looked up from your account if omitted |
+| `NARWAL_PRODUCT_KEY` | No | Product key. Looked up from your account if omitted |
+
+If the account has several robots and `NARWAL_DEVICE_ID` is not set, the first one is used (the scripts print which).
 
 ## Finding Your Device ID (MQTT Device Name)
+
+**Usually not needed.** The integration and these scripts get the device name from the Narwal cloud (`getDeviceInfoList`) after login. The procedure below is only for troubleshooting, e.g. if that lookup fails.
 
 The Narwal cloud API does not expose the MQTT device name (a 32-character hex string). You need to intercept the MQTT traffic between the Narwal app and the cloud broker to discover it. The `mqtt_mitm.py` script automates this.
 

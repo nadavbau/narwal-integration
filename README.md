@@ -6,6 +6,15 @@ A custom Home Assistant integration for **Narwal** robot vacuums (Freo X Ultra a
 
 > **⚠️ Work in Progress** — This integration is under active development. Expect breaking changes, incomplete features, and rough edges. Contributions and bug reports are welcome!
 
+> [!WARNING]
+> **There are two Narwal integrations, and they can't be installed together.**
+> This one and [sjmotew/NarwalIntegration](https://github.com/sjmotew/NarwalIntegration) both install to `custom_components/narwal` (domain `narwal`), so Home Assistant and HACS can only hold one of them at a time. Pick the one that matches your robot:
+>
+> - **This integration** talks to the robot through the Narwal cloud (your Narwal app account). It's built and tested on the **Freo X Ultra**, which has no local API.
+> - **[sjmotew/NarwalIntegration](https://github.com/sjmotew/NarwalIntegration)** is fully local (WebSocket on port 9002, no account) and targets models that expose that interface, such as the Flow, Flow 2, Freo Z10 / Z10 Ultra, Freo X10 Pro and Freo 20. See its compatibility table.
+>
+> To switch, remove the installed one first (its integration entry, then the HACS download), restart Home Assistant, and then install the other. Renaming either domain isn't planned: it would break every existing user's config entries and entity IDs ([#9](https://github.com/nadavbau/narwal-integration/issues/9)).
+
 ## Features
 
 - **Vacuum entity**: start, stop, pause/resume, return to dock, locate, suction level, live state (cleaning, paused, returning, docked, error)
@@ -43,17 +52,12 @@ Other Narwal models using the same cloud platform should also work.
 
 1. Go to **Settings > Devices & Services > Add Integration**
 2. Search for **Narwal**
-3. Enter your Narwal app credentials:
-   - **Email** -- your Narwal app account email
-   - **Password** -- your Narwal app account password
-   - **Region** -- the region your account is registered in (US, Israel, Europe, or China)
-4. Enter your device details:
-   - **Product Key** -- the product key for your vacuum model (default `EHf6cRNRGT` for Freo X Ultra)
-   - **Device Name** -- your device's unique identifier (a 32-character hex string)
+3. Sign in with your Narwal app account:
+   - **Email** and **Password** — the ones you use in the Narwal app
+   - **Region** — where the account is registered (US, Israel, Europe or China)
+4. That's it. Your robots are fetched from the Narwal cloud: with one robot it is added straight away; with several you pick one (add the integration again for each robot).
 
-### Finding your Device Name
-
-The Device Name is the 32-character hex string that identifies your specific vacuum on the Narwal cloud. You can find it in the Narwal app's network traffic, or by checking the MQTT topics the vacuum subscribes to. It looks like: `abcdef1234567890abcdef1234567890`.
+If the robot list can't be loaded, the flow falls back to asking for the product key (`EHf6cRNRGT` for the Freo X Ultra) and the robot's 32-character MQTT device name; `scripts/README.md` explains how to find it.
 
 ## Lovelace card
 
