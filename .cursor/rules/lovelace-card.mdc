@@ -32,6 +32,4 @@ The editor element must NOT use shadow DOM — append directly to `this`
 
 ## Entity Resolution
 
-Support explicit config AND auto-detection fallback for all entities
-(camera, battery sensor, mode select). Search `hass.states` for
-`*narwal*` patterns as fallback.
+Support explicit config AND auto-detection for all related entities. Auto-detect through the vacuum's device: find entities in `hass.entities` with the same `device_id` and the integration's `translation_key` (`map`, `battery`, `clean_mode`, `mop_humidity`, `error`, `consumables_due`, `dry_mop`, …). Entity IDs vary per install (the clean-mode select may be `select.narwal_<key>` with no `clean_mode` in it), so matching `*narwal*` names in `hass.states` is only a last-resort fallback.

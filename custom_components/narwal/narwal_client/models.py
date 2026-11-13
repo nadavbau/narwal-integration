@@ -3,178 +3,131 @@
 from __future__ import annotations
 
 import logging
-import struct
+import time
 from dataclasses import dataclass, field
-from .const import ROOM_SUB_TYPE_NAMES, WorkingStatus
+from typing import Any
+
+from .const import ROOM_SUB_TYPE_NAMES, SUCCESS_RESULTS, FanLevel, MopHumidity
+from .proto import ProtoError, decode
 
 _LOGGER = logging.getLogger(__name__)
+
+# Activity values (mirror Home Assistant's VacuumActivity strings).
+ACTIVITY_CLEANING = "cleaning"
+ACTIVITY_DOCKED = "docked"
+ACTIVITY_IDLE = "idle"
+ACTIVITY_PAUSED = "paused"
+ACTIVITY_RETURNING = "returning"
+ACTIVITY_ERROR = "error"
+
+# Top-level task types that mean "the robot is out cleaning".
+_CLEANING_TASKS = frozenset({
+    "TASK_TYPE_SWEEP",
+    "TASK_TYPE_MOP",
+    "TASK_TYPE_SWEEP_THEN_MOP",
+    "TASK_TYPE_SWEEP_AND_MOP",
+    "TASK_TYPE_SMART_CLEAN",
+    "TASK_TYPE_COMPOSITE_CLEAN",
+    "TASK_TYPE_MAINTIAN_FLOOR",
+    "TASK_TYPE_BUILD_MAP",
+    "TASK_TYPE_UPDATE_MAP",
+    "TASK_TYPE_DEPARTURE",
+    "TASK_TYPE_RELOCALIZATION",
+})
+# Station-side tasks: the robot is on the dock doing maintenance.
+_DOCK_TASKS = frozenset({
+    "TASK_TYPE_WASH_AND_DRY_MOP",
+    "TASK_TYPE_DUST_GATHERING",
+    "TASK_TYPE_DRY_STATION_BAG",
+    "TASK_TYPE_PUMP_TROUBLESHOOTING",
+    "TASK_TYPE_ROBOT_SEWAGE_BOX_PUMP_TROUBLESHOOTING",
+})
+_RETURN_TASKS = frozenset({"TASK_TYPE_RECALL", "TASK_TYPE_PARKING"})
+
+_FRIENDLY_IDLE = {
+    "IDLE_STATUS_IN_STATION": "Docked",
+    "IDLE_STATUS_LOW_POWER_IN_STATION": "Sleeping on dock",
+    "IDLE_STATUS_OUTSIDE_STATION": "Idle",
+    "IDLE_STATUS_LOW_POWER_OUTSIDE_STATION": "Sleeping off dock",
+    "IDLE_STATUS_UNINSTALLED_CLEAN_MODULE": "Cleaning module missing",
+    "IDLE_STATUS_UNINSTALLED_SWEEP_MODULE": "Vacuum module missing",
+    "IDLE_STATUS_UNINSTALLED_MOP_MODULE": "Mop module missing",
+}
+_TASK_NAMES = {
+    "TASK_TYPE_SWEEP": "Vacuuming",
+    "TASK_TYPE_MOP": "Mopping",
+    "TASK_TYPE_SWEEP_THEN_MOP": "Vacuum then mop",
+    "TASK_TYPE_SWEEP_AND_MOP": "Vacuum and mop",
+    "TASK_TYPE_SMART_CLEAN": "Smart clean",
+    "TASK_TYPE_RECALL": "Returning to base",
+    "TASK_TYPE_WASH_AND_DRY_MOP": "Mop care",
+    "TASK_TYPE_DUST_GATHERING": "Emptying dust bin",
+    "TASK_TYPE_DRY_STATION_BAG": "Drying dust bag",
+    "TASK_TYPE_BUILD_MAP": "Mapping",
+    "TASK_TYPE_UPDATE_MAP": "Updating map",
+    "TASK_TYPE_UPGRADE": "Updating firmware",
+    "TASK_TYPE_RELOCALIZATION": "Relocating",
+}
+_IN_STATION_IDLE = frozenset({"IDLE_STATUS_IN_STATION", "IDLE_STATUS_LOW_POWER_IN_STATION"})
+_CONTACTED = frozenset({"STATION_CONTACT_TYPE_CONTACTED", "STATION_CONTACT_TYPE_CHARGING"})
+
+
+def _pretty(label: Any, prefix: str = "") -> str:
+    """'SWEEP_AND_MOP_STATUS_ROOM_CLEAN' -> 'Room clean' (prefix stripped)."""
+    if not isinstance(label, str):
+        return str(label) if label is not None else ""
+    if prefix and label.startswith(prefix):
+        label = label[len(prefix):]
+    return label.replace("_", " ").capitalize()
+
+
+def strip_narwal_frame(raw: bytes) -> bytes:
+    """Drop the 0x01 + varint(len) + auth-protobuf header; return the message."""
+    if len(raw) < 2 or raw[0] != 0x01:
+        return raw
+    length = shift = 0
+    pos = 1
+    while pos < len(raw):
+        byte = raw[pos]
+        pos += 1
+        length |= (byte & 0x7F) << shift
+        shift += 7
+        if not byte & 0x80:
+            break
+    return raw[pos + length:]
 
 
 @dataclass
 class CommandResponse:
     """Parsed command response."""
 
-    result_code: int = 0
-    success: bool = False
+    command: str
     raw: bytes = b""
-    data: bytes = b""
+    message: dict[str, Any] = field(default_factory=dict)
+    result: str | int | None = None
+
+    @property
+    def success(self) -> bool:
+        # Read-only commands (get_feature_list, get_device_info) carry no
+        # result field at all; treat a missing result as success.
+        return self.result is None or self.result in SUCCESS_RESULTS or self.result == 1
 
     @classmethod
-    def from_payload(cls, payload: bytes) -> CommandResponse:
-        """Parse response: field 1 (varint) = success, field 2 (bytes) = data payload."""
-        resp = cls(raw=payload)
-        fields = parse_protobuf_fields(payload)
-        if 1 in fields and isinstance(fields[1], int):
-            resp.result_code = fields[1]
-            resp.success = resp.result_code == 1
-        if 2 in fields and isinstance(fields[2], bytes):
-            resp.data = fields[2]
+    def parse(cls, command: str, raw: bytes, message_type: str | None) -> CommandResponse:
+        body = strip_narwal_frame(raw)
+        resp = cls(command=command, raw=body)
+        if message_type:
+            try:
+                resp.message = decode(message_type, body)
+            except ProtoError:
+                _LOGGER.debug("Could not decode %s as %s: %s", command, message_type, body.hex())
+        resp.result = resp.message.get("result")
         return resp
 
 
 @dataclass
-class NarwalState:
-    """Current vacuum state assembled from status broadcasts."""
-
-    working_status: WorkingStatus = WorkingStatus.UNKNOWN
-    battery_level: float = 0.0
-    is_cleaning: bool = False
-    is_paused: bool = False
-    is_returning: bool = False
-    is_docked: bool = False
-    elapsed_time: int = 0
-    cleaned_area: int = 0
-    device_reachable: bool = False
-
-    # Raw protobuf data for fields we don't fully decode yet
-    raw_base_status: dict = field(default_factory=dict)
-    raw_working_status: dict = field(default_factory=dict)
-
-    def update_base_status(self, payload: bytes) -> None:
-        """Update from robot_base_status protobuf.
-
-        The payload field layout (confirmed via captures):
-          field 2 (fixed32) = battery level as IEEE 754 float32
-          field 3 (sub-message) = mode/state
-            sub-field 1 = working status enum
-            sub-field 2 = is_paused (in some captures, sub-field 4)
-            sub-field 7 = is_returning
-            sub-field 10 = dock sub-state (1=docked)
-          field 13 (string) = user UUID
-        """
-        fields = parse_protobuf_fields(payload)
-        self.raw_base_status = fields
-        _LOGGER.debug(
-            "Parsed base status fields: %s",
-            {
-                k: (v.hex() if isinstance(v, bytes) else v)
-                for k, v in fields.items()
-            },
-        )
-
-        # Field 2 = battery as IEEE 754 float32 (little-endian fixed32)
-        if 2 in fields:
-            val = fields[2]
-            if isinstance(val, int):
-                try:
-                    self.battery_level = struct.unpack('<f', struct.pack('<I', val))[0]
-                except Exception:
-                    self.battery_level = float(val)
-            elif isinstance(val, (float, int)):
-                self.battery_level = float(val)
-
-        # Field 3 = mode/state sub-message
-        sub: dict = {}
-        prev_status = self.working_status
-        if 3 in fields and isinstance(fields[3], bytes):
-            sub = parse_protobuf_fields(fields[3])
-            if 1 in sub and isinstance(sub[1], int):
-                raw_status = sub[1]
-                try:
-                    self.working_status = WorkingStatus(raw_status)
-                except ValueError:
-                    _LOGGER.warning(
-                        "Unknown working_status value: %d, sub-fields: %s",
-                        raw_status, sub,
-                    )
-                    self.working_status = WorkingStatus.UNKNOWN
-
-                # Disambiguate raw_status=2: this firmware reuses the
-                # PAUSED slot for any active task. Captured payloads
-                # during scheduled clean: {1: 2, 4: 8/7/3} with no
-                # is_paused flag (sub[2]). Use the explicit flags:
-                #   sub[2] = is_paused  (1 = actually paused)
-                #   sub[7] = is_returning (1 = en route to dock)
-                # Without either flag set, treat as CLEANING.
-                if self.working_status == WorkingStatus.PAUSED:
-                    if sub.get(7, 0) == 1:
-                        self.working_status = WorkingStatus.RETURNING
-                    elif sub.get(2, 0) != 1:
-                        self.working_status = WorkingStatus.CLEANING
-
-        # Derive boolean flags from working_status (always, not just when
-        # field 3 is present) so they stay in sync even if field 3 parsing
-        # fails due to protobuf format variations.
-        self.is_paused = self.working_status == WorkingStatus.PAUSED
-        self.is_cleaning = self.working_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT
-        )
-        self.is_returning = self.working_status == WorkingStatus.RETURNING
-        self.is_docked = self.working_status in (
-            WorkingStatus.DOCKED, WorkingStatus.CHARGED,
-            WorkingStatus.CHARGING, WorkingStatus.MOP_WASHING,
-            WorkingStatus.MOP_DRYING, WorkingStatus.DUST_COLLECTING,
-        )
-        # Log state transitions at WARNING so we can diagnose enum
-        # mismapping without asking the user to change log levels.
-        log = _LOGGER.warning if self.working_status != prev_status else _LOGGER.debug
-        log(
-            "State update: status=%s battery=%.1f%% sub_fields=%s",
-            self.working_status.name, self.battery_level, sub,
-        )
-
-    rooms: list[RoomInfo] = field(default_factory=list)
-
-    def update_rooms_from_map(self, map_data: bytes) -> None:
-        """Extract room list from map protobuf field 12 (repeated room entries).
-
-        Field 12 contains user-visible rooms with proper sub_type classification
-        and optional user-assigned names.  It appears as a repeated protobuf field
-        so we must use parse_protobuf_repeated to collect all occurrences.
-        """
-        self.rooms = _parse_rooms_from_field12(map_data)
-        _LOGGER.debug("Parsed %d rooms from map data (field 12)", len(self.rooms))
-
-    def update_working_status(self, payload: bytes) -> None:
-        """Update elapsed_time/cleaned_area from working_status protobuf.
-
-        This firmware keeps sending working_status pushes even after
-        cleaning ends and the vacuum returns to the dock (elapsed_time
-        stays frozen at the cycle's final value). The push presence is
-        therefore NOT a reliable "actively cleaning" signal — base_status
-        is authoritative for working_status enum, and is now resolved
-        correctly via update_base_status. Leave the enum alone here.
-        """
-        fields = parse_protobuf_fields(payload)
-        self.raw_working_status = fields
-
-        if 3 in fields:
-            self.elapsed_time = fields[3]
-        if 13 in fields:
-            self.cleaned_area = fields[13]
-
-
-@dataclass
 class RoomInfo:
-    """A room discovered from the vacuum's map.
-
-    Parsed from map response field 12 (repeated). Each entry contains:
-      field 1: room_id
-      field 2: room_sub_type (ROOM_SUB_TYPE enum)
-      field 3: user-assigned name (UTF-8, empty if not renamed by user)
-      field 4: category (1=room, 2=utility/small space)
-      field 8: instance_index (1-based, for numbering duplicates)
-    """
+    """A room from the vacuum's map (``StaticMapPayload.roomInfos``)."""
 
     room_id: int
     room_sub_type: int = 0
@@ -192,189 +145,267 @@ class RoomInfo:
         return base
 
 
-def _parse_rooms_from_field12(map_data: bytes) -> list[RoomInfo]:
-    """Extract rooms from repeated field 12 entries in the map protobuf."""
-    all_fields = parse_protobuf_repeated(map_data)
-    entries = all_fields.get(12, [])
-    rooms: list[RoomInfo] = []
-    for entry in entries:
-        if not isinstance(entry, bytes):
-            continue
-        rf = parse_protobuf_fields(entry)
-        room_id = rf.get(1)
-        if not isinstance(room_id, int):
-            continue
-        name_raw = rf.get(3, "")
-        if isinstance(name_raw, bytes):
-            try:
-                name = name_raw.decode("utf-8")
-            except UnicodeDecodeError:
-                name = ""
-        elif isinstance(name_raw, str):
-            name = name_raw
-        else:
-            name = ""
-        rooms.append(RoomInfo(
-            room_id=room_id,
-            room_sub_type=rf.get(2, 0) if isinstance(rf.get(2), int) else 0,
-            name=name,
-            category=rf.get(4, 0) if isinstance(rf.get(4), int) else 0,
-            instance_index=rf.get(8, 0) if isinstance(rf.get(8), int) else 0,
-        ))
-    return rooms
+@dataclass
+class Pose:
+    """Position in map grid-cell units and heading in radians."""
+
+    x: float
+    y: float
+    theta: float = 0.0
+
+    @classmethod
+    def from_msg(cls, msg: dict[str, Any] | None) -> Pose | None:
+        if not isinstance(msg, dict):
+            return None
+        loc = msg.get("location") or {}
+        if "x" not in loc and "y" not in loc:
+            return None
+        return cls(float(loc.get("x", 0.0)), float(loc.get("y", 0.0)), float(msg.get("theta", 0.0)))
 
 
-def parse_protobuf_repeated(data: bytes) -> dict[int, list]:
-    """Parse protobuf collecting ALL occurrences of each field as a list.
+@dataclass
+class MapSnapshot:
+    """The static map plus enough geometry to place the robot on it."""
 
-    Standard parse_protobuf_fields keeps only the last value per field number,
-    which silently drops repeated fields.  This variant returns
-    {field_num: [value1, value2, ...]} so repeated entries are preserved.
-    """
-    fields: dict[int, list] = {}
-    idx = 0
-    while idx < len(data):
-        tag_byte = data[idx]
-        wire_type = tag_byte & 0x07
-        field_num = tag_byte >> 3
+    map_id: int
+    width: int
+    height: int
+    resolution_mm: int
+    left: int
+    bottom: int
+    grid: bytes
+    rotate_angle: int = 0
+    station: Pose | None = None
+    robot: Pose | None = None
+    fetched_at: float = field(default_factory=time.time)
 
-        if tag_byte & 0x80:
-            tag_val = 0
-            shift = 0
-            while idx < len(data):
-                b = data[idx]
-                tag_val |= (b & 0x7F) << shift
-                shift += 7
-                idx += 1
-                if b & 0x80 == 0:
-                    break
-            wire_type = tag_val & 0x07
-            field_num = tag_val >> 3
-        else:
-            idx += 1
+    def to_pixel(self, pose: Pose) -> tuple[float, float]:
+        """Map coords -> grid pixel (origin bottom-left, before any flip).
 
-        if wire_type == 0:
-            val = 0
-            shift = 0
-            while idx < len(data):
-                b = data[idx]
-                val |= (b & 0x7F) << shift
-                shift += 7
-                idx += 1
-                if b & 0x80 == 0:
-                    break
-            fields.setdefault(field_num, []).append(val)
-        elif wire_type == 1:
-            if idx + 8 <= len(data):
-                fields.setdefault(field_num, []).append(
-                    int.from_bytes(data[idx : idx + 8], "little")
-                )
-                idx += 8
-        elif wire_type == 2:
-            length = 0
-            shift = 0
-            while idx < len(data):
-                b = data[idx]
-                length |= (b & 0x7F) << shift
-                shift += 7
-                idx += 1
-                if b & 0x80 == 0:
-                    break
-            if idx + length <= len(data):
-                fields.setdefault(field_num, []).append(data[idx : idx + length])
-                idx += length
-            else:
-                break
-        elif wire_type == 5:
-            if idx + 4 <= len(data):
-                fields.setdefault(field_num, []).append(
-                    int.from_bytes(data[idx : idx + 4], "little")
-                )
-                idx += 4
-        else:
-            break
-    return fields
+        Poses are in grid-cell units already (verified: the docked robot lands
+        ~4 cells from a wall); only the border offset is applied.
+        """
+        return pose.x - self.left, pose.y - self.bottom
 
 
-def parse_protobuf_fields(data: bytes) -> dict:
-    """Minimal protobuf field parser. Returns {field_num: value}.
+@dataclass
+class NarwalState:
+    """Current vacuum state assembled from pushes and command responses."""
 
-    Handles varint (wire type 0), 64-bit (1), length-delimited (2),
-    and 32-bit (5). For length-delimited fields, returns raw bytes
-    if they don't look like a string.
-    """
-    fields: dict = {}
-    idx = 0
-    while idx < len(data):
-        if idx >= len(data):
-            break
-        tag_byte = data[idx]
-        wire_type = tag_byte & 0x07
-        field_num = tag_byte >> 3
+    device_reachable: bool = False
+    base: dict[str, Any] = field(default_factory=dict)  # RobotBaseStatus
+    working: dict[str, Any] = field(default_factory=dict)  # WorkingStatus
+    config: dict[str, Any] = field(default_factory=dict)  # GetConfig_Response.config
+    features: dict[str, Any] = field(default_factory=dict)
+    consumables_due: dict[str, list[str]] = field(default_factory=dict)
+    firmware_version: str = ""
+    rooms: list[RoomInfo] = field(default_factory=list)
+    map: MapSnapshot | None = None
+    robot_pose: Pose | None = None
+    current_room_id: int | None = None
+    no_go_room_ids: set[int] = field(default_factory=set)
+    preferred_fan_level: FanLevel | None = None
+    preferred_mop_humidity: MopHumidity | None = None
+    last_base_update: float = 0.0
 
-        # Handle multi-byte field numbers
-        if tag_byte & 0x80:
-            tag_val = 0
-            shift = 0
-            while idx < len(data):
-                b = data[idx]
-                tag_val |= (b & 0x7F) << shift
-                shift += 7
-                idx += 1
-                if b & 0x80 == 0:
-                    break
-            wire_type = tag_val & 0x07
-            field_num = tag_val >> 3
-        else:
-            idx += 1
+    # ---- update paths -------------------------------------------------
 
-        if wire_type == 0:  # varint
-            val = 0
-            shift = 0
-            while idx < len(data):
-                b = data[idx]
-                val |= (b & 0x7F) << shift
-                shift += 7
-                idx += 1
-                if b & 0x80 == 0:
-                    break
-            fields[field_num] = val
+    def update_base_status(self, base: dict[str, Any]) -> None:
+        prev = self.activity
+        self.base = base
+        self.last_base_update = time.time()
+        if self.activity != prev:
+            _LOGGER.info(
+                "Narwal activity %s -> %s (task=%s, sub=%s)",
+                prev, self.activity, self.task, self.sub_status,
+            )
 
-        elif wire_type == 1:  # 64-bit fixed
-            if idx + 8 <= len(data):
-                fields[field_num] = int.from_bytes(data[idx:idx+8], 'little')
-                idx += 8
+    def update_working_status(self, working: dict[str, Any]) -> None:
+        self.working = working
+        zone = working.get("cleaningZoneId")
+        if isinstance(zone, int) and zone:
+            self.current_room_id = zone
 
-        elif wire_type == 2:  # length-delimited
-            length = 0
-            shift = 0
-            while idx < len(data):
-                b = data[idx]
-                length |= (b & 0x7F) << shift
-                shift += 7
-                idx += 1
-                if b & 0x80 == 0:
-                    break
-            if idx + length <= len(data):
-                raw = data[idx:idx+length]
-                try:
-                    text = raw.decode('utf-8')
-                    if text.isprintable():
-                        fields[field_num] = text
-                    else:
-                        fields[field_num] = raw
-                except (UnicodeDecodeError, ValueError):
-                    fields[field_num] = raw
-                idx += length
-            else:
-                break
+    def update_display_map(self, display: dict[str, Any]) -> None:
+        pose = Pose.from_msg(display.get("robot"))
+        if pose:
+            self.robot_pose = pose
+        zone = display.get("currentCleanZoneId")
+        if isinstance(zone, int):
+            self.current_room_id = zone or None
 
-        elif wire_type == 5:  # 32-bit fixed
-            if idx + 4 <= len(data):
-                fields[field_num] = int.from_bytes(data[idx:idx+4], 'little')
-                idx += 4
+    def update_rooms_from_map(self, static_map: dict[str, Any]) -> None:
+        rooms: list[RoomInfo] = []
+        for info in static_map.get("roomInfos", []):
+            if not isinstance(info, dict) or "roomId" not in info:
+                continue
+            rooms.append(RoomInfo(
+                room_id=int(info["roomId"]),
+                room_sub_type=int(info.get("type", 0) or 0),
+                name=str(info.get("customName", "") or ""),
+                instance_index=int(info.get("roomTypeId", 0) or 0),
+            ))
+        if rooms:
+            self.rooms = sorted(rooms, key=lambda r: r.room_id)
+        # Whole rooms marked no-go for both vacuum and mop; the robot refuses
+        # any task that includes them, so a full-house clean must skip them.
+        self.no_go_room_ids = {
+            int(f["roomId"])
+            for f in static_map.get("forbiddens", [])
+            if isinstance(f, dict)
+            and f.get("mode") == "FORBIDDEN_MODE_ROOM"
+            and f.get("type") in ("FORBIDDEN_TYPE_SWEEP_MOP", "FORBIDDEN_TYPE_UNSPECIFIED", None)
+            and f.get("roomId")
+        }
 
-        else:
-            break  # unknown wire type
+    # ---- derived properties -------------------------------------------
 
-    return fields
+    @property
+    def task_status(self) -> dict[str, Any]:
+        status = self.base.get("robotTaskStatus")
+        return status if isinstance(status, dict) else {}
+
+    @property
+    def task(self) -> str:
+        task = self.task_status.get("task")
+        return task if isinstance(task, str) else "TASK_TYPE_UNSPECIFIED"
+
+    @property
+    def sub_status(self) -> str:
+        """The task-specific sub-status label (e.g. SWEEP_STATUS_ROOM_CLEAN)."""
+        for key, value in self.task_status.items():
+            if key != "task" and isinstance(value, str):
+                return value
+        return ""
+
+    @property
+    def battery_level(self) -> float | None:
+        value = self.base.get("batteryPercentage")
+        if isinstance(value, (int, float)):
+            return max(0.0, min(100.0, float(value)))
+        return None
+
+    @property
+    def error_codes(self) -> list[int]:
+        codes = []
+        for err in self.base.get("errorCode", []) or []:
+            if isinstance(err, dict) and err.get("identityCode"):
+                codes.append(int(err["identityCode"]))
+        return codes
+
+    @property
+    def on_station(self) -> bool:
+        return (
+            self.base.get("stationContactType") in _CONTACTED
+            or self.sub_status in _IN_STATION_IDLE
+        )
+
+    @property
+    def is_charging(self) -> bool:
+        if self.base.get("stationContactType") == "STATION_CONTACT_TYPE_CHARGING":
+            return True
+        return self.on_station and self.base.get("chargingStatus") == "CHG_STATUS_CHARGING"
+
+    @property
+    def activity(self) -> str:
+        if not self.base:
+            return ACTIVITY_IDLE
+        if self.error_codes and self.task in ("TASK_TYPE_IDLE", "TASK_TYPE_UNSPECIFIED"):
+            return ACTIVITY_ERROR
+        task, sub = self.task, self.sub_status
+        if (
+            self.task_status.get("pauseStatus")
+            or sub.endswith("_WAITING_COMMAND")
+            or task == "TASK_TYPE_WAITING_COMMAND"
+        ):
+            return ACTIVITY_PAUSED
+        if task in _RETURN_TASKS:
+            return ACTIVITY_RETURNING
+        if task in _CLEANING_TASKS:
+            if "RECALL" in sub or "BACK_TO_STATION" in sub or sub.endswith("_PARKING"):
+                return ACTIVITY_RETURNING
+            return ACTIVITY_CLEANING
+        if task in _DOCK_TASKS:
+            return ACTIVITY_DOCKED
+        if task == "TASK_TYPE_IDLE":
+            return ACTIVITY_DOCKED if self.on_station else ACTIVITY_IDLE
+        return ACTIVITY_DOCKED if self.on_station else ACTIVITY_IDLE
+
+    @property
+    def is_paused(self) -> bool:
+        return self.activity == ACTIVITY_PAUSED
+
+    @property
+    def is_cleaning(self) -> bool:
+        return self.task in _CLEANING_TASKS
+
+    @property
+    def status_text(self) -> str:
+        """Readable status similar to the app, e.g. 'Sweep and mop: room clean'."""
+        if not self.device_reachable:
+            return "Offline"
+        if not self.base:
+            return "Unknown"
+        sub = self.sub_status
+        if self.task == "TASK_TYPE_IDLE":
+            if self.is_charging:
+                return "Charging"
+            if sub in _FRIENDLY_IDLE:
+                return _FRIENDLY_IDLE[sub]
+        task = _TASK_NAMES.get(self.task) or _pretty(self.task, "TASK_TYPE_")
+        if sub:
+            prefix = sub.rsplit("_STATUS_", 1)[0] + "_STATUS_" if "_STATUS_" in sub else ""
+            return f"{task}: {_pretty(sub, prefix).lower()}"
+        return task
+
+    @property
+    def fan_level(self) -> FanLevel | None:
+        """Suction: the robot's live value while cleaning, else the level the
+        next clean will use (a choice made in HA while docked wins)."""
+        reported = _enum_from_label(FanLevel, self.base.get("fanLevel"), "FAN_LEVEL_", {"MUTE": "QUIET", "SUPER": "MAX"})
+        if self.is_cleaning:
+            return reported
+        return self.preferred_fan_level or reported
+
+    @property
+    def mop_humidity(self) -> MopHumidity | None:
+        reported = _enum_from_label(MopHumidity, self.base.get("mopHumidity"), "MOP_HUMIDITY_")
+        if self.is_cleaning:
+            return reported
+        return self.preferred_mop_humidity or reported
+
+    @property
+    def cleaned_area(self) -> float | None:
+        """Area covered in the current/last task, m²."""
+        value = self.working.get("coveredArea")
+        return round(float(value), 1) if isinstance(value, (int, float)) else None
+
+    @property
+    def elapsed_time(self) -> int | None:
+        value = self.working.get("timeConsuming")
+        return int(value) if isinstance(value, int) else None
+
+    @property
+    def remaining_time(self) -> int | None:
+        value = self.working.get("remainedTime")
+        return int(value) if isinstance(value, int) else None
+
+    @property
+    def progress(self) -> float | None:
+        value = self.working.get("workingProgress")
+        if not isinstance(value, (int, float)):
+            return None
+        # The robot reports 0..1 on some firmware and 0..100 on others.
+        return round(value * 100 if value <= 1.0 else value, 1)
+
+
+def _enum_from_label(enum_cls, label: Any, prefix: str, aliases: dict[str, str] | None = None):
+    if not isinstance(label, str) or not label.startswith(prefix):
+        return None
+    name = label[len(prefix):]
+    name = (aliases or {}).get(name, name)
+    try:
+        member = enum_cls[name]
+    except KeyError:
+        return None
+    return None if member.value == 0 else member

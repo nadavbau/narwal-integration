@@ -50,7 +50,21 @@ def _require_env(name: str, default: str | None = None) -> str:
     return val
 
 
+def load_env_file(path: str | None = None) -> None:
+    """Load KEY=VALUE lines from scripts/.env (if present) without overriding
+    variables already set in the environment."""
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    for line in open(path):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 def get_config() -> dict:
+    load_env_file()
     region = os.environ.get("NARWAL_REGION", "il")
     return {
         "email": _require_env("NARWAL_EMAIL"),
@@ -247,22 +261,36 @@ class NarwalMQTT:
         self.client.disconnect()
 
 
-def parse_command_result(payload: bytes | None) -> int | None:
-    """Extract the result code (field 1) from a command response payload."""
-    if not payload:
-        return None
-    if payload[0] == 0x01:
-        idx = 1
-        while idx < len(payload) and payload[idx] & 0x80:
-            idx += 1
-        idx += 1
-        inner = payload[idx:]
-    else:
-        inner = payload
+# ---------------------------------------------------------------------------
+# The integration's protocol library
+# ---------------------------------------------------------------------------
 
-    fields = parse_protobuf_fields(inner)
-    vals = fields.get(1, [])
-    return vals[0] if vals and isinstance(vals[0], int) else None
+def load_narwal_client():
+    """Import custom_components/narwal/narwal_client standalone (no Home
+    Assistant needed) and return the package. Scripts use it so they speak
+    exactly the protocol the integration speaks."""
+    import importlib
+    import types
+
+    if "narwal_client" not in sys.modules:
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                            "custom_components", "narwal", "narwal_client")
+        pkg = types.ModuleType("narwal_client")
+        pkg.__path__ = [os.path.abspath(root)]
+        sys.modules["narwal_client"] = pkg
+    for name in ("const", "proto", "models", "client", "map_renderer", "error_codes"):
+        importlib.import_module(f"narwal_client.{name}")
+    return sys.modules["narwal_client"]
 
 
-RESULT_NAMES = {1: "SUCCESS", 2: "NOT_APPLICABLE", 3: "CONFLICT"}
+async def connect_client(cfg: dict | None = None):
+    """Log in and return a connected narwal_client NarwalClient."""
+    cfg = cfg or get_config()
+    lib = load_narwal_client()
+    user_uuid, token = cloud_login(cfg)
+    client = lib.client.NarwalClient(
+        cfg["product_key"], cfg["device_id"], user_uuid, user_uuid, token,
+        broker=cfg["mqtt_host"],
+    )
+    await client.connect()
+    return client

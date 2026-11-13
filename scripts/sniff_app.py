@@ -3,11 +3,12 @@
 
 Usage:
   export NARWAL_EMAIL=... NARWAL_PASSWORD=... NARWAL_DEVICE_ID=... NARWAL_REGION=il
-  python tests/sniff_app.py [--duration SECONDS]
+  python3 sniff_app.py [--duration SECONDS]
 
 The script listens for MQTT messages from the vacuum and the official app,
-printing topic, size, raw hex, and decoded protobuf fields. It includes
-a specialised decoder for clean/start_clean payloads.
+printing topic, size, raw hex, and the payload decoded with the
+integration's schema (field and enum names from the official app).
+Credentials come from scripts/.env or the environment.
 """
 
 from __future__ import annotations
@@ -17,13 +18,24 @@ import sys
 import time
 from datetime import datetime
 
-from _common import (
-    NarwalMQTT,
-    auth_payload,
-    cloud_login,
-    get_config,
-    parse_protobuf_fields,
-)
+from _common import NarwalMQTT, cloud_login, get_config, load_narwal_client
+
+lib = load_narwal_client()
+decode = lib.proto.decode
+strip_frame = lib.models.strip_narwal_frame
+
+# What each topic carries (requests are what the app sends).
+REQUEST_TYPES = {
+    "clean/start_clean": "StartClean_Request",
+    "clean/set_fan_level": "SetFanLevel_Request",
+    "clean/set_mop_humidity": "SetMopHumidity_Request",
+    "config/set": "SetConfig_Request",
+    "consumable/reset_consumable_info": "ResetConsumableInfo_Request",
+    "common/active_robot_publish": "ActiveRobotPublish_Request",
+    "map/get_map": "GetMap_Request",
+}
+RESPONSE_TYPES = lib.client.RESPONSE_TYPES
+PUSH_TYPES = lib.client._PUSH_TYPES
 
 # All known command and status topics to subscribe to
 TOPICS = [
@@ -34,6 +46,7 @@ TOPICS = [
     "status/robot_base_status",
     "status/working_status",
     "status/upgrade_status",
+    "map/display_map",
     "clean/start_clean", "clean/start_clean/response",
     "clean/plan/start", "clean/plan/start/response",
     "clean/easy_clean/start", "clean/easy_clean/start/response",
@@ -48,6 +61,7 @@ TOPICS = [
     "supply/wash_mop", "supply/wash_mop/response",
     "supply/dry_mop", "supply/dry_mop/response",
     "supply/dust_gathering", "supply/dust_gathering/response",
+    "supply/wash_and_dry_mop", "supply/wash_and_dry_mop/response",
     "config/get", "config/get/response",
     "config/set", "config/set/response",
     "config/volume/set", "config/volume/set/response",
@@ -58,68 +72,30 @@ TOPICS = [
 ]
 
 # Topics with high-frequency updates that we'll batch
-STATUS_TOPICS = {"status/robot_base_status"}
+STATUS_TOPICS = {"status/robot_base_status", "map/display_map"}
 
 status_count = 0
 last_status_flush = 0.0
 
 
-def decode_clean_payload(raw: bytes) -> None:
-    """Decode the extra clean configuration appended outside the Narwal frame."""
-    if raw[0] != 0x01:
-        return
-    idx = 1
-    while idx < len(raw) and raw[idx] & 0x80:
-        idx += 1
-    idx += 1
-    frame_end = idx
-    while frame_end < len(raw):
-        tag = raw[frame_end]; frame_end += 1
-        wt = tag & 7
-        if wt == 0:
-            while frame_end < len(raw) and raw[frame_end] & 0x80:
-                frame_end += 1
-            frame_end += 1
-        elif wt == 2:
-            length = 0; shift = 0
-            while frame_end < len(raw):
-                b = raw[frame_end]; frame_end += 1
-                length |= (b & 0x7F) << shift; shift += 7
-                if not (b & 0x80):
-                    break
-            frame_end += length
-        elif wt == 5:
-            frame_end += 4
-        elif wt == 1:
-            frame_end += 8
-        else:
-            break
+def message_type(topic: str) -> str | None:
+    if topic.endswith("/response"):
+        return RESPONSE_TYPES.get(topic[: -len("/response")], "SetFanLevel_Response")
+    return PUSH_TYPES.get(topic) or REQUEST_TYPES.get(topic)
 
-    extra = raw[idx:]
-    if not extra:
-        return
-    print(f"       Extra ({len(extra)}b): {extra.hex()}")
-    print("       --- Decoded clean config ---")
 
-    fields = parse_protobuf_fields(extra)
-    for fn, vals in fields.items():
-        for v in vals:
-            if isinstance(v, bytes):
-                cfg_fields = parse_protobuf_fields(v)
-                print(f"       config.{fn} = sub({len(v)}b): {v.hex()}")
-                for cfn, cvals in cfg_fields.items():
-                    for cv in cvals:
-                        if isinstance(cv, bytes):
-                            sub = parse_protobuf_fields(cv)
-                            sub_dict = {k: vs[0] for k, vs in sub.items()}
-                            if cfn == 1:
-                                print(f"         roomlist.{cfn} = {sub_dict}")
-                            else:
-                                print(f"         room entry: {sub_dict}")
-                        else:
-                            print(f"         roomlist.{cfn} = {cv}")
-            else:
-                print(f"       config.{fn} = {v}")
+def print_decoded(topic: str, payload: bytes) -> None:
+    msg_type = message_type(topic)
+    if not msg_type:
+        return
+    try:
+        decoded = decode(msg_type, strip_frame(payload))
+    except Exception as err:  # noqa: BLE001 - diagnostic tool
+        print(f"       (decode as {msg_type} failed: {err})")
+        return
+    shown = {k: (f"<{len(v)} bytes>" if isinstance(v, (bytes, bytearray)) and len(v) > 32 else v)
+             for k, v in decoded.items()}
+    print(f"       {msg_type}: {shown}")
 
 
 def on_message(msg):
@@ -154,18 +130,7 @@ def on_message(msg):
     if hasattr(msg.properties, "ResponseTopic") and msg.properties.ResponseTopic:
         print(f"       ResponseTopic: {msg.properties.ResponseTopic}")
 
-    if "start_clean" in short and "/response" not in short:
-        try:
-            decode_clean_payload(payload)
-        except Exception as e:
-            print(f"       (decode error: {e})")
-
-    if "working_status" in short:
-        try:
-            fields = parse_protobuf_fields(payload)
-            print(f"       Fields: {fields}")
-        except Exception:
-            pass
+    print_decoded(short, payload)
 
 
 def main():

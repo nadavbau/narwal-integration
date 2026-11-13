@@ -8,12 +8,13 @@ A custom Home Assistant integration for **Narwal** robot vacuums (Freo X Ultra a
 
 ## Features
 
-- **Vacuum entity** with full control: start, stop, pause, return to dock, locate (beep), fan speed
-- **Battery sensor** with real-time level
-- **Status sensor** showing current activity (Standby, Cleaning, Docked, etc.)
-- **Cleaning time** and **cleaned area** sensors
-- **Cloud login** with email/password -- no manual token extraction needed
-- **Automatic token refresh** to maintain persistent connectivity
+- **Vacuum entity**: start, stop, pause/resume, return to dock, locate, suction level, live state (cleaning, paused, returning, docked, error)
+- **Room cleaning**: native Home Assistant *clean area* support (map rooms to HA areas, then `vacuum.clean_area`), plus `vacuum.send_command` → `clean_rooms` with per-call mode, suction, mop wetness and passes. Rooms marked no-go in the Narwal app are skipped automatically.
+- **Live map** camera: rooms, names, dock, robot position and heading, current room highlighted, oriented like the app
+- **Dock actions**: dry mops, wash and dry mops, empty dust bin (buttons and `send_command`)
+- **Settings**: volume, do-not-disturb, child lock, auto-empty, quiet auto-empty, auto detergent, carpet boost, pet mode, mop drying, mop-wash frequency, carpet handling
+- **Status sensors**: battery, detailed status, errors (with the app's own messages), cleaning time, time remaining, cleaned area, progress, current room, clean/dirty water tanks, dust bin, detergent, maintenance items due, charging, docked
+- **Cloud login** with email/password and automatic token refresh
 
 ## Supported Devices
 
@@ -54,27 +55,60 @@ Other Narwal models using the same cloud platform should also work.
 
 The Device Name is the 32-character hex string that identifies your specific vacuum on the Narwal cloud. You can find it in the Narwal app's network traffic, or by checking the MQTT topics the vacuum subscribes to. It looks like: `abcdef1234567890abcdef1234567890`.
 
+## Lovelace card
+
+The integration registers a `custom:narwal-vacuum-card` automatically:
+
+```yaml
+type: custom:narwal-vacuum-card
+entity: vacuum.narwal_vacuum
+```
+
+It shows status, battery, error and maintenance banners, the live map, room selection (no-go rooms are disabled), cleaning mode, suction and mop wetness, start/pause/resume, stop, dock, locate, and dock actions (dry mops, wash and dry, empty dust bin). Related entities are found automatically from the vacuum's device; `camera_entity`, `battery_entity` and `mode_entity` can override them.
+
 ## Entities
 
 ### Vacuum
 
-| Feature | Description |
-|---------|-------------|
-| Start | Begin a cleaning session (or resume if paused) |
-| Stop | Force-stop the current task |
-| Pause | Pause the current cleaning task |
-| Return to Base | Recall the vacuum to its dock |
-| Locate | Make the vacuum beep |
-| Fan Speed | Quiet, Normal, Strong, Max |
+| Feature | Notes |
+|---------|-------|
+| Start | Resumes if paused, otherwise cleans all rooms (except no-go rooms) using the **Clean mode** select and **Clean passes** number |
+| Stop / Pause / Return to base / Locate | |
+| Fan speed | Quiet, Normal, Strong, Max. The robot only accepts changes during a clean; while docked the choice is remembered and used for the next clean |
+| Clean area | Home Assistant 2026.3+: open the vacuum's settings → *Map rooms to areas*, then call `vacuum.clean_area` |
 
-### Sensors
+`vacuum.send_command` commands:
 
-| Sensor | Description |
-|--------|-------------|
-| Battery | Current battery percentage |
-| Status | Working status (Standby, Cleaning, Docked, Charged, Error) |
-| Cleaning Time | Elapsed time of the current/last cleaning session |
-| Cleaned Area | Area covered in the current/last cleaning session |
+```yaml
+# Clean specific rooms (room ids are in the vacuum's `rooms` attribute)
+action: vacuum.send_command
+target:
+  entity_id: vacuum.narwal_vacuum
+data:
+  command: clean_rooms
+  params:
+    rooms: [4, 2]
+    mode: "Vacuum & Mop"      # optional: Vacuum & Mop, Vacuum then Mop, Vacuum Only, Mop Only
+    fan_speed: Strong         # optional: Quiet, Normal, Strong, Max
+    mop_humidity: wet         # optional: dry, normal, wet
+    passes: 2                 # optional: 1-3
+```
+
+Also: `dry_mop`, `wash_and_dry_mop`, `wash_mop` (mid-clean only), `empty_dustbin`.
+
+### Other entities
+
+| Type | Entities |
+|------|----------|
+| Sensor | Battery, Status, Error, Cleaning time, Time remaining, Cleaned area, Cleaning progress, Current room, Maintenance items due, Clean water tank, Dirty water tank, Dust bin, Detergent |
+| Binary sensor | Charging, Docked, Problem, Maintenance due |
+| Select | Clean mode, Mop wetness, Mop drying, Mop washing frequency, Carpet handling |
+| Switch | Do not disturb, Child lock, Auto-empty, Quiet auto-empty, Auto detergent, Carpet boost, Pet mode, Smart deep clean*, Hot water mop wash* |
+| Number | Volume, Clean passes |
+| Button | Locate, Wake up, Dry mops, Wash and dry mops, Wash mops, Empty dust bin |
+| Camera | Map |
+
+\* disabled by default; not every model supports them.
 
 ## Architecture
 
@@ -89,7 +123,7 @@ The integration authenticates using the same API as the official Narwal mobile a
 
 1. **REST API login** (`loginByEmail`) to obtain a JWT access token
 2. **MQTT connection** using the JWT as the password
-3. **Protobuf-encoded** commands and status messages over MQTT topics
+3. **Protobuf-encoded** commands and status messages over MQTT topics. Field numbers and enums come from the official Narwal app's message definitions (`narwal_client/schema.py`), encoded/decoded by `narwal_client/proto.py`
 4. **Automatic token refresh** when the JWT approaches expiry
 
 ## Development
@@ -97,30 +131,41 @@ The integration authenticates using the same API as the official Narwal mobile a
 ### Requirements
 
 - Python 3.12+
-- Home Assistant 2024.1.0+
+- Home Assistant 2025.3.0+ (room cleaning by area needs 2026.3+)
 - `paho-mqtt` >= 2.0.0
+
+### Tests
+
+The tests run the real integration inside Home Assistant against a fake robot that answers with protocol-correct messages:
+
+```bash
+pip install -r requirements_test.txt
+pytest
+```
 
 ### Project Structure
 
 ```
 custom_components/narwal/
-├── __init__.py              # Integration setup/teardown
+├── __init__.py              # Integration setup/teardown, card registration
 ├── config_flow.py           # Two-step UI config flow (login + device)
-├── const.py                 # HA-level constants
-├── coordinator.py           # DataUpdateCoordinator with token refresh
-├── entity.py                # Base entity with device info
-├── manifest.json            # HA integration manifest
-├── sensor.py                # Battery, status, time, area sensors
-├── strings.json             # UI strings
-├── vacuum.py                # Vacuum entity with full control
-├── translations/
-│   └── en.json              # English translations
+├── const.py                 # HA-level constants (fan speeds, clean modes)
+├── coordinator.py           # MQTT pushes + polling, token refresh, map/settings refresh
+├── entity.py                # Base entity: device info, command error handling
+├── vacuum.py                # Vacuum entity, clean area (segments), send_command
+├── sensor.py / binary_sensor.py / select.py / switch.py / number.py / button.py
+├── camera.py                # Map rendering (coordinator owns map fetching)
+├── strings.json, translations/en.json
+├── frontend/narwal-vacuum-card.js
 └── narwal_client/           # Standalone Narwal protocol library
-    ├── __init__.py           # Library exports
-    ├── client.py             # MQTT client (connect, commands, state)
-    ├── cloud.py              # REST API client (login, refresh, discovery)
-    ├── const.py              # Protocol constants, MQTT topics, enums
-    └── models.py             # State models, protobuf parser
+    ├── client.py             # MQTT client: connect, commands, pushes
+    ├── cloud.py              # REST API client (login, refresh)
+    ├── const.py              # Topics, enums matching the app
+    ├── models.py             # NarwalState: activity, status, rooms, map geometry
+    ├── proto.py              # Schema-driven protobuf encode/decode
+    ├── schema.py             # Generated: field numbers/enums from the Narwal app
+    ├── error_codes.py        # Robot error code -> app message (J4 platform)
+    └── map_renderer.py       # Grid -> PNG with rooms, dock and robot
 ```
 
 ## License

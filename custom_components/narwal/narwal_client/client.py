@@ -9,40 +9,87 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 import paho.mqtt.client as mqtt
-from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 
 from .const import (
+    BROADCAST_TOPICS,
+    CLEAN_MODE_LABEL,
     COMMAND_RESPONSE_TIMEOUT,
     MQTT_BROKER,
     MQTT_PORT,
+    SERVICE_RESULT_MESSAGES,
     TOPIC_CMD_ACTIVE_ROBOT,
-    TOPIC_CMD_EASY_CLEAN,
+    TOPIC_CMD_DRY_MOP,
+    TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_BASE_STATUS,
     TOPIC_CMD_GET_CONFIG,
     TOPIC_CMD_GET_CONSUMABLE,
     TOPIC_CMD_GET_DEVICE_INFO,
+    TOPIC_CMD_GET_FEATURE_LIST,
+    TOPIC_CMD_GET_FIRMWARE_VERSION,
     TOPIC_CMD_GET_MAP,
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESET_CONSUMABLE,
     TOPIC_CMD_RESUME,
+    TOPIC_CMD_SET_CONFIG,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_MOP_HUMIDITY,
     TOPIC_CMD_START_CLEAN,
-    TOPIC_CMD_START_PLAN,
+    TOPIC_CMD_WASH_AND_DRY_MOP,
+    TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_YELL,
+    TOPIC_DISPLAY_MAP,
     TOPIC_ROBOT_BASE_STATUS,
+    TOPIC_UPGRADE_STATUS,
     TOPIC_WORKING_STATUS,
     CleanMode,
     FanLevel,
     MopHumidity,
 )
-from .models import CommandResponse, NarwalState
+from .models import CommandResponse, MapSnapshot, NarwalState, Pose, strip_narwal_frame
+from .proto import ProtoError, decode, encode, encode_varint
 
 _LOGGER = logging.getLogger(__name__)
+
+# Response message type for each command we decode.
+RESPONSE_TYPES: dict[str, str] = {
+    TOPIC_CMD_GET_BASE_STATUS: "GetDeviceBaseStatus_Response",
+    TOPIC_CMD_GET_CONFIG: "GetConfig_Response",
+    TOPIC_CMD_SET_CONFIG: "SetConfig_Response",
+    TOPIC_CMD_GET_CONSUMABLE: "GetConsumableInfo_Response",
+    TOPIC_CMD_GET_FEATURE_LIST: "GetFeatureList_Response",
+    TOPIC_CMD_GET_FIRMWARE_VERSION: "GetFirmwareVersion_Response",
+    TOPIC_CMD_GET_MAP: "GetMap_Response",
+    TOPIC_CMD_SET_FAN_LEVEL: "SetFanLevel_Response",
+    TOPIC_CMD_SET_MOP_HUMIDITY: "SetMopHumidity_Response",
+    TOPIC_CMD_START_CLEAN: "StartClean_Response",
+}
+# Commands whose response just carries a ServiceResult in field 1.
+_GENERIC_RESULT = "SetFanLevel_Response"
+
+# Response topics subscribed on connect. Narwal's broker only routes to
+# explicit subscriptions, so pre-subscribing saves a SUBACK round trip per
+# command (previously a fixed 0.5 s sleep on every call).
+_PRESUBSCRIBE = (
+    TOPIC_CMD_GET_BASE_STATUS, TOPIC_CMD_GET_CONFIG, TOPIC_CMD_SET_CONFIG,
+    TOPIC_CMD_GET_CONSUMABLE, TOPIC_CMD_GET_MAP, TOPIC_CMD_YELL, TOPIC_CMD_PAUSE,
+    TOPIC_CMD_RESUME, TOPIC_CMD_FORCE_END, TOPIC_CMD_RECALL, TOPIC_CMD_START_CLEAN,
+    TOPIC_CMD_SET_FAN_LEVEL, TOPIC_CMD_SET_MOP_HUMIDITY, TOPIC_CMD_WASH_MOP,
+    TOPIC_CMD_DRY_MOP, TOPIC_CMD_WASH_AND_DRY_MOP, TOPIC_CMD_DUST_GATHERING,
+)
+
+_PUSH_TYPES = {
+    TOPIC_ROBOT_BASE_STATUS: "RobotBaseStatus",
+    TOPIC_WORKING_STATUS: "WorkingStatus",
+    TOPIC_DISPLAY_MAP: "DisplayMap",
+    TOPIC_UPGRADE_STATUS: "OTAUpgradeStatus",
+}
 
 
 class NarwalConnectionError(Exception):
@@ -50,31 +97,25 @@ class NarwalConnectionError(Exception):
 
 
 class NarwalCommandError(Exception):
-    """Raised when a command fails or times out."""
+    """Raised when a command fails, is rejected, or times out."""
+
+    def __init__(self, message: str, *, timeout: bool = False, result: Any = None) -> None:
+        super().__init__(message)
+        self.timeout = timeout
+        self.result = result
 
 
-def _encode_varint(value: int) -> bytes:
-    result = []
-    while value > 0x7F:
-        result.append((value & 0x7F) | 0x80)
-        value >>= 7
-    result.append(value & 0x7F)
-    return bytes(result)
+def _pb_string(field_num: int, value: str | bytes) -> bytes:
+    data = value.encode() if isinstance(value, str) else value
+    return encode_varint((field_num << 3) | 2) + encode_varint(len(data)) + data
 
 
-def _make_protobuf_string(field_num: int, value: str | bytes) -> bytes:
-    tag = (field_num << 3) | 2
-    encoded = value.encode() if isinstance(value, str) else value
-    return bytes([tag]) + _encode_varint(len(encoded)) + encoded
-
-
-def _make_protobuf_varint(field_num: int, value: int) -> bytes:
-    tag = (field_num << 3) | 0
-    return bytes([tag]) + _encode_varint(value)
+def _pb_varint(field_num: int, value: int) -> bytes:
+    return encode_varint(field_num << 3) + encode_varint(value)
 
 
 class NarwalClient:
-    """Async MQTT client for Narwal vacuum cloud communication."""
+    """MQTT client for Narwal vacuum cloud communication."""
 
     def __init__(
         self,
@@ -104,14 +145,12 @@ class NarwalClient:
         self._client: mqtt.Client | None = None
         self._connected = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._tls_insecure = False
-        # Response matching: topic -> (Event, payload_holder)
         self._pending_responses: dict[str, tuple[threading.Event, list[bytes | None]]] = {}
-        # SUBACK tracking: mid -> Event
         self._pending_subacks: dict[int, threading.Event] = {}
-        # Per-command locks to prevent concurrent calls to the same command
-        # from colliding in _pending_responses (same response topic key).
+        self._subscribed: set[str] = set()
+        self._sub_lock = threading.Lock()
         self._command_locks: dict[str, threading.Lock] = {}
+        self.last_message_time: float = 0.0
 
     @property
     def base_topic(self) -> str:
@@ -121,61 +160,32 @@ class NarwalClient:
     def connected(self) -> bool:
         return self._connected.is_set()
 
-    def _build_user_payload(self, extra_inner: bytes = b"") -> bytes:
-        """Build the user auth protobuf wrapped in Narwal frame (0x01 + length + protobuf).
+    # ------------------------------------------------------------------
+    # Framing
+    # ------------------------------------------------------------------
 
-        extra_inner is appended INSIDE the 0x01 frame (after the user UUID fields)
-        so the vacuum parses them as part of the same message.
-        """
-        inner = b""
-        inner += _make_protobuf_string(1, self.user_uuid)
-        inner += _make_protobuf_string(2, self.user_uuid)
-        inner += extra_inner
-        return b'\x01' + _encode_varint(len(inner)) + inner
+    def _auth_frame(self) -> bytes:
+        """0x01 + varint(len) + {1: uuid, 2: uuid}; every request starts with it."""
+        inner = _pb_string(1, self.user_uuid) + _pb_string(2, self.user_uuid)
+        return b"\x01" + encode_varint(len(inner)) + inner
 
-    def _build_publish_properties(self, topic: str, request_id: str) -> Properties:
-        """Build MQTT5 PUBLISH properties with correlation data and response topic."""
-        response_topic = f"{topic}/response"
-        timestamp_ms = int(time.time() * 1000)
-
-        corr_data = b""
-        corr_data += _make_protobuf_string(1, request_id)
-        corr_data += _make_protobuf_varint(3, 0)
-        corr_data += _make_protobuf_varint(4, timestamp_ms)
-
+    def _build_publish_properties(self, topic: str) -> Properties:
+        corr = (
+            _pb_string(1, str(uuid.uuid1()))
+            + _pb_varint(3, 0)
+            + _pb_varint(4, int(time.time() * 1000))
+        )
         props = Properties(PacketTypes.PUBLISH)
-        props.ResponseTopic = response_topic
-        props.CorrelationData = corr_data
-
+        props.ResponseTopic = f"{topic}/response"
+        props.CorrelationData = corr
         return props
 
-    def _extract_app_payload(self, raw_payload: bytes) -> bytes:
-        """Extract the application payload, skipping the 0x01+length Narwal framing.
-
-        The frame is: 0x01 + varint(inner_length) + inner_protobuf + extra_fields
-        We return everything after the 0x01 byte as protobuf (the length prefix
-        and inner message are part of a larger protobuf that may have trailing fields).
-        """
-        if len(raw_payload) < 2:
-            return raw_payload
-
-        # Skip 0x01 frame byte and the varint length, return ALL remaining bytes
-        if raw_payload[0] == 0x01:
-            idx = 1
-            while idx < len(raw_payload) and raw_payload[idx] & 0x80:
-                idx += 1
-            idx += 1  # skip last byte of varint
-            return raw_payload[idx:]
-
-        return raw_payload
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Connect to MQTT broker.
-
-        All blocking I/O runs in an executor to avoid blocking HA's event loop.
-        Uses threading.Event instead of asyncio primitives to avoid
-        cross-thread future resolution issues in HA.
-        """
+        """Connect to the MQTT broker (blocking parts run in an executor)."""
         self._loop = asyncio.get_running_loop()
         self._connected.clear()
 
@@ -187,106 +197,45 @@ class NarwalClient:
                 raise NarwalConnectionError("MQTT connection timed out")
 
         await self._loop.run_in_executor(None, _connect_blocking)
-
-        # Tell the vacuum an app client is active so it starts sending pushes
         await self.notify_active()
 
     def _setup_mqtt_client(self) -> None:
-        """Create the paho-mqtt client, configure TLS, and initiate connection.
-
-        Runs in an executor thread to avoid blocking the event loop.
-        """
         self._mqtt_client_id = f"{self._mqtt_client_id_prefix}_{uuid.uuid4()}"
-        _LOGGER.info(
-            "Connecting to %s:%d as client_id=%s, base_topic=%s",
-            self.broker,
-            self.port,
-            self._mqtt_client_id,
-            self.base_topic,
-        )
-
+        _LOGGER.info("Connecting to %s:%d, base_topic=%s", self.broker, self.port, self.base_topic)
+        self._subscribed.clear()
         self._client = mqtt.Client(
             client_id=self._mqtt_client_id,
             protocol=mqtt.MQTTv5,
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         )
         self._client.username_pw_set(self._mqtt_username, self._mqtt_password)
-        _LOGGER.debug(
-            "MQTT password (first 20 chars): %s...",
-            self._mqtt_password[:20] if self._mqtt_password else "EMPTY",
-        )
-
-        ctx = ssl.create_default_context()
-        self._client.tls_set_context(ctx)
-        if self._tls_insecure:
-            self._client.tls_insecure_set(True)
-
+        self._client.tls_set_context(ssl.create_default_context())
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.on_disconnect = self._on_disconnect
         self._client.on_subscribe = self._on_subscribe
-        self._client.on_log = self._on_log
-
         self._client.connect(self.broker, self.port, keepalive=30)
         self._client.loop_start()
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
-        _LOGGER.info(
-            "MQTT connected: %s | base_topic=%s | client_id=%s",
-            reason_code, self.base_topic, self._mqtt_client_id,
-        )
-        if str(reason_code) == "Success" or reason_code == 0:
-            # Narwal's Aliyun IoT broker only routes messages to EXPLICIT
-            # subscriptions — wildcard subs are accepted but don't deliver.
-            # Subscribe to each broadcast topic the vacuum pushes.
-            broadcast_topics = [
-                f"{self.base_topic}/{TOPIC_ROBOT_BASE_STATUS}",
-                f"{self.base_topic}/{TOPIC_WORKING_STATUS}",
-            ]
-            for bt in broadcast_topics:
-                rc, mid = client.subscribe(bt, qos=1)
-                _LOGGER.debug("Subscribed to broadcast: %s (rc=%s mid=%s)", bt, rc, mid)
-            self._connected.set()
-            self.state.device_reachable = True
-            self._notify_state_update()
-        else:
-            _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
+        if not (str(reason_code) == "Success" or reason_code == 0):
+            _LOGGER.error("MQTT connection rejected: %s", reason_code)
+            return
+        _LOGGER.info("MQTT connected (%s)", self.base_topic)
+        self._subscribed.clear()
+        topics = [f"{self.base_topic}/{t}" for t in BROADCAST_TOPICS]
+        topics += [f"{self.base_topic}/{t}/response" for t in _PRESUBSCRIBE]
+        for topic in topics:
+            client.subscribe(topic, qos=1)
+            self._subscribed.add(topic)
+        self._connected.set()
+        self.state.device_reachable = True
+        self._notify_state_update()
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
-        _LOGGER.debug("MQTT SUBACK (mid=%s): %s", mid, reason_codes)
         evt = self._pending_subacks.pop(mid, None)
         if evt:
             evt.set()
-
-    def _on_log(self, client, userdata, level, buf):
-        """Forward paho-mqtt internal log messages."""
-        _LOGGER.debug("PAHO: %s", buf)
-
-    def _on_message(self, client, userdata, msg):
-        """Handle all incoming messages: command responses and broadcasts."""
-        topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.debug(
-            "MQTT << %s (%d bytes) pending=%s",
-            topic_suffix, len(msg.payload),
-            list(self._pending_responses.keys()),
-        )
-
-        # Check for pending command response
-        if msg.topic in self._pending_responses:
-            event, holder = self._pending_responses.pop(msg.topic)
-            holder[0] = msg.payload
-            event.set()
-            return
-
-        # Handle status broadcasts
-        payload = self._extract_app_payload(msg.payload)
-
-        if topic_suffix == "status/robot_base_status":
-            self.state.update_base_status(payload)
-            self._notify_state_update()
-        elif topic_suffix == "status/working_status":
-            self.state.update_working_status(payload)
-            self._notify_state_update()
 
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         _LOGGER.warning("MQTT disconnected: %s", reason_code)
@@ -294,8 +243,7 @@ class NarwalClient:
         self.state.device_reachable = False
         self._notify_state_update()
 
-    def _notify_state_update(self):
-        """Schedule a state update callback on the event loop (if available)."""
+    def _notify_state_update(self) -> None:
         cb = self.on_state_update
         loop = self._loop
         if cb and loop:
@@ -304,241 +252,220 @@ class NarwalClient:
             except RuntimeError:
                 pass
 
+    # ------------------------------------------------------------------
+    # Incoming messages
+    # ------------------------------------------------------------------
+
+    def _on_message(self, client, userdata, msg):
+        self.last_message_time = time.time()
+        pending = self._pending_responses.pop(msg.topic, None)
+        if pending:
+            event, holder = pending
+            holder[0] = msg.payload
+            event.set()
+            return
+
+        suffix = msg.topic[len(self.base_topic):].lstrip("/")
+        msg_type = _PUSH_TYPES.get(suffix)
+        if not msg_type:
+            return
+        try:
+            data = decode(msg_type, strip_narwal_frame(msg.payload))
+        except ProtoError:
+            _LOGGER.debug("Undecodable %s push: %s", suffix, msg.payload.hex())
+            return
+        if suffix == TOPIC_ROBOT_BASE_STATUS:
+            self.state.update_base_status(data)
+        elif suffix == TOPIC_WORKING_STATUS:
+            self.state.update_working_status(data)
+        elif suffix == TOPIC_DISPLAY_MAP:
+            self.state.update_display_map(data)
+        elif suffix == TOPIC_UPGRADE_STATUS:
+            _LOGGER.info("Firmware upgrade status: %s", data)
+        self.state.device_reachable = True
+        self._notify_state_update()
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
+
     async def send_command(
         self,
         command: str,
-        extra_payload: bytes = b"",
+        request: bytes = b"",
+        *,
         timeout: float = COMMAND_RESPONSE_TIMEOUT,
-        payload_override: bytes | None = None,
+        response_type: str | None = None,
+        check: bool = True,
+        retry: bool = True,
     ) -> CommandResponse:
-        """Send a command and wait for response.
+        """Send ``command`` with an encoded request body; wait for the reply.
 
-        The entire publish-and-wait runs in an executor thread using
-        threading.Event + message_callback_add, avoiding cross-thread
-        asyncio Future resolution which breaks in HA's event loop.
+        On timeout the robot is usually in deep sleep: re-announce ourselves
+        (which wakes it) and retry once. With ``check`` a non-success
+        ServiceResult raises NarwalCommandError with a readable reason.
         """
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
-
         loop = self._loop or asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, self._send_command_blocking, command, extra_payload, timeout, payload_override
-        )
+        # response_type=None -> look up / generic ServiceResult; "" -> don't decode.
+        rtype = RESPONSE_TYPES.get(command, _GENERIC_RESULT) if response_type is None else response_type
+        try:
+            raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+        except NarwalCommandError as err:
+            if not (retry and err.timeout):
+                raise
+            _LOGGER.info("%s timed out; waking robot and retrying once", command)
+            await self.notify_active()
+            await asyncio.sleep(1.5)
+            raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
 
-    def _get_command_lock(self, command: str) -> threading.Lock:
-        """Get or create a per-command lock to serialise concurrent calls."""
-        if command not in self._command_locks:
-            self._command_locks[command] = threading.Lock()
-        return self._command_locks[command]
+        resp = CommandResponse.parse(command, raw, rtype)
+        if check and not resp.success:
+            reason = SERVICE_RESULT_MESSAGES.get(str(resp.result), str(resp.result))
+            raise NarwalCommandError(f"{command}: {reason}", result=resp.result)
+        return resp
 
-    def _send_command_blocking(
-        self, command: str, extra_payload: bytes, timeout: float,
-        payload_override: bytes | None = None,
-    ) -> CommandResponse:
-        """Publish a command and block until the response arrives (runs in executor).
+    def _ensure_subscribed(self, topic: str) -> None:
+        with self._sub_lock:
+            if topic in self._subscribed:
+                return
+            evt = threading.Event()
+            rc, mid = self._client.subscribe(topic, qos=1)
+            if rc == 0:
+                self._pending_subacks[mid] = evt
+                evt.wait(timeout=3.0)
+                self._subscribed.add(topic)
 
-        A per-command lock prevents concurrent calls to the same command from
-        colliding -- they share the same response topic key in _pending_responses,
-        so the second call would overwrite the first and both would timeout.
-        """
-        lock = self._get_command_lock(command)
+    def _send_blocking(self, command: str, request: bytes, timeout: float) -> bytes:
+        lock = self._command_locks.setdefault(command, threading.Lock())
         with lock:
-            return self._send_command_locked(command, extra_payload, timeout, payload_override)
+            topic = f"{self.base_topic}/{command}"
+            response_topic = f"{topic}/response"
+            self._ensure_subscribed(response_topic)
+            event = threading.Event()
+            holder: list[bytes | None] = [None]
+            self._pending_responses[response_topic] = (event, holder)
+            self._client.publish(
+                topic, self._auth_frame() + request, qos=1,
+                properties=self._build_publish_properties(topic),
+            )
+            if not event.wait(timeout=timeout):
+                self._pending_responses.pop(response_topic, None)
+                raise NarwalCommandError(f"{command} timed out", timeout=True)
+            return holder[0] or b""
 
-    def _send_command_locked(
-        self, command: str, extra_payload: bytes, timeout: float,
-        payload_override: bytes | None = None,
-    ) -> CommandResponse:
-        topic = f"{self.base_topic}/{command}"
-        response_topic = f"{topic}/response"
-        request_id = str(uuid.uuid1())
-
-        # Narwal's Aliyun IoT broker only routes messages to explicit
-        # subscriptions — the wildcard doesn't deliver.  Subscribe to
-        # the specific response topic and wait briefly for SUBACK.
-        rc_sub, mid_sub = self._client.subscribe(response_topic, qos=1)
-        _LOGGER.debug(
-            "Subscribed to %s (rc=%s mid=%s)", response_topic, rc_sub, mid_sub,
-        )
-        if rc_sub != 0:
-            _LOGGER.error("Subscribe FAILED for %s: rc=%s", response_topic, rc_sub)
-        time.sleep(0.5)
-
-        response_event = threading.Event()
-        response_holder: list[bytes | None] = [None]
-        self._pending_responses[response_topic] = (response_event, response_holder)
-
-        props = self._build_publish_properties(topic, request_id)
-        if payload_override is not None:
-            payload = payload_override
-        else:
-            payload = self._build_user_payload() + extra_payload
-        result = self._client.publish(topic, payload, qos=1, properties=props)
-        _LOGGER.debug(
-            "Published >> %s | response_topic=%s | rc=%s mid=%s",
-            command, response_topic, result.rc, result.mid,
-        )
-
-        if not response_event.wait(timeout=timeout):
-            self._pending_responses.pop(response_topic, None)
-            _LOGGER.error("Command timeout: %s (%.0fs)", command, timeout)
-            raise NarwalCommandError(f"Command {command} timed out")
-
-        app_payload = self._extract_app_payload(response_holder[0])
-        return CommandResponse.from_payload(app_payload)
-
-    async def send_command_no_response(
-        self,
-        command: str,
-        extra_payload: bytes = b"",
-        payload_override: bytes | None = None,
-    ) -> None:
-        """Send a command without waiting for a response."""
+    async def _publish_no_response(self, command: str, request: bytes) -> None:
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
-
         topic = f"{self.base_topic}/{command}"
-        request_id = str(uuid.uuid1())
-        props = self._build_publish_properties(topic, request_id)
-        if payload_override is not None:
-            payload = payload_override
-        else:
-            payload = self._build_user_payload() + extra_payload
-        self._client.publish(topic, payload, qos=1, properties=props)
-
-    # --- High-level commands ---
-
-    def _build_active_robot_payload(self) -> bytes:
-        """Build active_robot_publish payload matching the Narwal app format.
-
-        The app sends keepalive parameters OUTSIDE the Narwal auth frame:
-          field 1 (sub-msg): {1:2000, 2:2000, 3:2000}  — push intervals (ms)
-          field 8: 0
-          field 2: 60000  — keepalive interval (ms)
-          field 3: 0
-        """
-        keepalive_config = (
-            _make_protobuf_varint(1, 2000)
-            + _make_protobuf_varint(2, 2000)
-            + _make_protobuf_varint(3, 2000)
+        self._client.publish(
+            topic, self._auth_frame() + request, qos=1,
+            properties=self._build_publish_properties(topic),
         )
-        extra = (
-            _make_protobuf_string(1, keepalive_config)
-            + _make_protobuf_varint(8, 0)
-            + _make_protobuf_varint(2, 60000)
-            + _make_protobuf_varint(3, 0)
-        )
-        return self._build_user_payload() + extra
 
     async def notify_active(self) -> None:
-        """Announce this client to the vacuum, triggering push status broadcasts."""
+        """Announce an app client; the robot then pushes status every ~2 s."""
         try:
-            payload = self._build_active_robot_payload()
-            await self.send_command_no_response(
-                TOPIC_CMD_ACTIVE_ROBOT, payload_override=payload,
-            )
-            _LOGGER.info("Sent active_robot notification")
-        except Exception:
-            _LOGGER.debug("active_robot notification failed", exc_info=True)
+            request = encode("ActiveRobotPublish_Request", {
+                "topicsDuration": {
+                    "workStatusDuration": 2000,
+                    "displayMapDuration": 2000,
+                    "robotBaseStatusDuration": 2000,
+                },
+                "publishDuration": 60000,
+            })
+            await self._publish_no_response(TOPIC_CMD_ACTIVE_ROBOT, request)
+        except Exception:  # noqa: BLE001 - best effort keepalive
+            _LOGGER.debug("active_robot_publish failed", exc_info=True)
+
+    # ---- status / info -------------------------------------------------
+
+    async def request_status_update(self) -> None:
+        resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS, retry=False)
+        base = resp.message.get("robotBaseStatus")
+        if isinstance(base, dict):
+            self.state.update_base_status(base)
+            self.state.device_reachable = True
+            self._notify_state_update()
+
+    async def fetch_config(self) -> dict[str, Any]:
+        resp = await self.send_command(TOPIC_CMD_GET_CONFIG)
+        config = resp.message.get("config")
+        if isinstance(config, dict):
+            self.state.config = config
+            self._notify_state_update()
+        return self.state.config
+
+    async def fetch_consumables(self) -> dict[str, list[str]]:
+        resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE, check=False)
+        info = resp.message.get("consumableInfo") or {}
+        self.state.consumables_due = {
+            "maintain": [i for i in info.get("maintainItems", []) if isinstance(i, str)],
+            "replace": [i for i in info.get("replaceItems", []) if isinstance(i, str)],
+        }
+        self._notify_state_update()
+        return self.state.consumables_due
+
+    async def fetch_device_info(self) -> None:
+        """Feature flags and firmware version (static; fetch once)."""
+        try:
+            resp = await self.send_command(TOPIC_CMD_GET_FEATURE_LIST, check=False)
+            self.state.features = {k: v for k, v in resp.message.items() if not k.startswith("#")}
+        except NarwalCommandError:
+            _LOGGER.debug("get_feature_list failed")
+        try:
+            resp = await self.send_command(TOPIC_CMD_GET_FIRMWARE_VERSION, check=False)
+            text = resp.message.get("firmwareVersionText")
+            if not text:
+                resp = await self.send_command(TOPIC_CMD_GET_DEVICE_INFO, check=False, response_type="")
+                text = _device_info_version(resp.raw)
+            self.state.firmware_version = (text or "").strip()
+        except NarwalCommandError:
+            _LOGGER.debug("firmware version query failed")
+
+    async def get_map(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=20.0)
+
+    async def fetch_map(self) -> MapSnapshot | None:
+        """Fetch the static map; updates rooms and map geometry in state."""
+        resp = await self.get_map()
+        static = resp.message.get("map")
+        if not isinstance(static, dict):
+            return None
+        self.state.update_rooms_from_map(static)
+        border = static.get("border") or {}
+        grid = static.get("mapData") or b""
+        if not grid or not static.get("width"):
+            return self.state.map
+        snapshot = MapSnapshot(
+            map_id=int(static.get("mapId", 0) or 0),
+            width=int(static["width"]),
+            height=int(static.get("height", 0)),
+            resolution_mm=int(static.get("resolution", 60) or 60),
+            left=int(border.get("left", 0)),
+            bottom=int(border.get("bottom", 0)),
+            grid=grid,
+            rotate_angle=int(static.get("rotateAngle", 0) or 0),
+            station=Pose.from_msg(static.get("station")),
+            robot=Pose.from_msg(static.get("robotPose")),
+        )
+        self.state.map = snapshot
+        if snapshot.robot and not self.state.robot_pose:
+            self.state.robot_pose = snapshot.robot
+        self._notify_state_update()
+        return snapshot
+
+    async def fetch_rooms(self) -> None:
+        try:
+            await self.fetch_map()
+        except NarwalCommandError:
+            _LOGGER.warning("Failed to fetch rooms from map")
+
+    # ---- control -------------------------------------------------------
 
     async def locate(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_YELL)
-
-    def _build_clean_payload(
-        self,
-        room_ids: list[int],
-        mode: CleanMode = CleanMode.VACUUM_AND_MOP,
-        fan_level: FanLevel = FanLevel.NORMAL,
-        mop_humidity: MopHumidity = MopHumidity.NORMAL,
-        passes: int = 2,
-    ) -> bytes:
-        """Build a clean/start_clean payload matching the Narwal app format.
-
-        The Narwal frame (auth) comes first, then a clean configuration
-        protobuf is appended OUTSIDE the frame.
-
-        The room_id goes in the global config (field 1, sub-field 2),
-        NOT in the room entry. The room entry contains cleaning parameters
-        like passes, vacuum/mop on/off, fan level, etc.
-        """
-        vacuum_on = mode in (CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP, CleanMode.VACUUM_ONLY)
-        mop_on = mode in (CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP, CleanMode.MOP_ONLY)
-
-        room_config = (
-            _make_protobuf_varint(1, passes)
-            + _make_protobuf_varint(2, passes)
-            + _make_protobuf_varint(3, 1 if vacuum_on else 0)
-            + _make_protobuf_varint(4, 1 if mop_on else 2)
-            + _make_protobuf_varint(5, fan_level.value)
-            + _make_protobuf_varint(6, mop_humidity.value)
-            + _make_protobuf_varint(7, 1)
-            + _make_protobuf_varint(8, 1)
-            + _make_protobuf_varint(9, 1)
-            + _make_protobuf_varint(10, 0)
-        )
-
-        room_list = b""
-        for rid in room_ids:
-            global_config = _make_protobuf_varint(1, 1) + _make_protobuf_varint(2, rid)
-            room_list += _make_protobuf_string(1, global_config)
-            room_list += _make_protobuf_string(2, room_config)
-        room_list += _make_protobuf_varint(3, 1)
-
-        clean_config = (
-            _make_protobuf_varint(1, 1)
-            + _make_protobuf_string(2, room_list)
-            + _make_protobuf_varint(3, 1)
-            + _make_protobuf_string(4, _make_protobuf_varint(1, 1) + _make_protobuf_varint(5, 0))
-            + _make_protobuf_varint(5, 1)
-        )
-
-        frame = self._build_user_payload()
-        return frame + _make_protobuf_string(1, clean_config)
-
-    async def start(self) -> CommandResponse:
-        return await self.start_clean()
-
-    async def start_clean(
-        self,
-        mode: CleanMode | None = None,
-        room_ids: list[int] | None = None,
-        fan_level: FanLevel = FanLevel.NORMAL,
-        mop_humidity: MopHumidity = MopHumidity.NORMAL,
-    ) -> CommandResponse:
-        """Start cleaning via clean/start_clean (the protocol the app uses).
-
-        Args:
-            mode: Cleaning mode. None uses VACUUM_AND_MOP.
-            room_ids: Room IDs to clean. If empty/None, cleans all known rooms.
-            fan_level: Suction power level.
-            mop_humidity: Mop wetness level.
-        """
-        effective_mode = mode or CleanMode.VACUUM_AND_MOP
-
-        await self.notify_active()
-
-        if not room_ids:
-            room_ids = [r.room_id for r in self.state.rooms] if self.state.rooms else []
-        if not room_ids:
-            _LOGGER.warning("No room IDs available — fetching map first")
-            await self.fetch_rooms()
-            room_ids = [r.room_id for r in self.state.rooms] if self.state.rooms else []
-        if not room_ids:
-            raise NarwalCommandError("Cannot start clean: no rooms discovered")
-
-        payload = self._build_clean_payload(room_ids, effective_mode, fan_level, mop_humidity)
-        return await self.send_command(TOPIC_CMD_START_CLEAN, payload_override=payload)
-
-    async def start_plan(
-        self,
-        mode: CleanMode | None = None,
-        room_ids: list[int] | None = None,
-    ) -> CommandResponse:
-        """Start a cleaning plan — delegates to start_clean."""
-        return await self.start_clean(mode=mode, room_ids=room_ids)
-
-    async def easy_clean(self) -> CommandResponse:
-        return await self.start_clean()
 
     async def pause(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_PAUSE)
@@ -552,80 +479,136 @@ class NarwalClient:
     async def return_to_base(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_RECALL)
 
-    async def set_fan_speed(self, level: FanLevel) -> CommandResponse:
-        extra = _make_protobuf_varint(1, level.value)
-        return await self.send_command(TOPIC_CMD_SET_FAN_LEVEL, extra)
+    async def wash_mop(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_WASH_MOP)
 
-    async def set_mop_humidity(self, level: MopHumidity) -> CommandResponse:
-        extra = _make_protobuf_varint(1, level.value)
-        return await self.send_command(TOPIC_CMD_SET_MOP_HUMIDITY, extra)
+    async def dry_mop(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_DRY_MOP)
 
-    async def get_device_info(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_GET_DEVICE_INFO)
+    async def wash_and_dry_mop(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_WASH_AND_DRY_MOP)
 
-    async def get_base_status(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_GET_BASE_STATUS)
+    async def empty_dustbin(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_DUST_GATHERING)
 
-    async def get_config(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_GET_CONFIG)
+    async def set_fan_speed(self, level: FanLevel) -> CommandResponse | None:
+        """Change suction. The robot only accepts this during a clean, so
+        while docked the choice is remembered and sent with the next clean."""
+        self.state.preferred_fan_level = level
+        resp = None
+        if self.state.is_cleaning:
+            request = encode("SetFanLevel_Request", {
+                "level": level.value, "operationType": "OPERATION_TYPE_SET_VALUE",
+            })
+            resp = await self.send_command(TOPIC_CMD_SET_FAN_LEVEL, request)
+            self.state.base["fanLevel"] = {v: k for k, v in _FAN_LABELS.items()}[level]
+        self._notify_state_update()
+        return resp
 
-    async def get_consumable_info(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_GET_CONSUMABLE)
+    async def set_mop_humidity(self, level: MopHumidity) -> CommandResponse | None:
+        """Change mop wetness; same docked/cleaning behaviour as suction."""
+        self.state.preferred_mop_humidity = level
+        resp = None
+        if self.state.is_cleaning:
+            request = encode("SetMopHumidity_Request", {
+                "mopHumidity": level.value, "operationType": "OPERATION_TYPE_SET_VALUE",
+            })
+            resp = await self.send_command(TOPIC_CMD_SET_MOP_HUMIDITY, request)
+            self.state.base["mopHumidity"] = f"MOP_HUMIDITY_{level.name}"
+        self._notify_state_update()
+        return resp
 
-    async def get_map(self) -> CommandResponse:
-        """Fetch the current map from the vacuum."""
-        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
+    async def set_config(self, **values: Any) -> CommandResponse:
+        """Change robot settings, e.g. ``set_config(childLockEnabled=True)``.
 
-    async def fetch_rooms(self) -> None:
-        """Fetch the map and update the room list in self.state."""
-        try:
-            resp = await self.get_map()
-            if resp.success and resp.data:
-                self.state.update_rooms_from_map(resp.data)
-                _LOGGER.info("Fetched %d rooms from map", len(self.state.rooms))
-        except NarwalCommandError:
-            _LOGGER.warning("Failed to fetch rooms from map")
-
-    async def request_status_update(self) -> None:
-        """Request a status update from the vacuum.
-
-        The command also triggers the vacuum to send a push broadcast on
-        status/robot_base_status, which _on_message handles separately.
+        Field names are SetConfig_Request's; on success the cached GetConfig
+        values are refreshed from the robot.
         """
+        request = encode("SetConfig_Request", values)
+        resp = await self.send_command(TOPIC_CMD_SET_CONFIG, request)
         try:
-            resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS)
-            _LOGGER.info(
-                "Status response: success=%s, data=%d bytes, raw=%d bytes",
-                resp.success,
-                len(resp.data),
-                len(resp.raw),
-            )
-            if resp.success and resp.data:
-                self.state.update_base_status(resp.data)
-                self._notify_state_update()
-            elif resp.success and resp.raw:
-                # Some firmware returns status fields inline in the response
-                # rather than nested in a field-2 sub-message.
-                self.state.update_base_status(resp.raw)
-                self._notify_state_update()
-                _LOGGER.info(
-                    "Parsed inline status: battery=%.1f%%, status=%s",
-                    self.state.battery_level,
-                    self.state.working_status.name,
-                )
+            await self.fetch_config()
         except NarwalCommandError:
-            _LOGGER.warning("Status request timed out")
-            raise
+            self.state.config.update(values)
+            self._notify_state_update()
+        return resp
+
+    async def reset_consumable(self, replace_item: str) -> CommandResponse:
+        request = encode("ResetConsumableInfo_Request", {
+            "consumableInfo": {"replaceItems": [replace_item]},
+        })
+        resp = await self.send_command(
+            TOPIC_CMD_RESET_CONSUMABLE, request,
+            response_type="ResetConsumableInfo_Response", check=False,
+        )
+        await self.fetch_consumables()
+        return resp
+
+    def build_clean_request(
+        self,
+        room_ids: list[int],
+        mode: CleanMode = CleanMode.VACUUM_AND_MOP,
+        fan_level: FanLevel | None = None,
+        mop_humidity: MopHumidity | None = None,
+        passes: int = 1,
+    ) -> bytes:
+        """Encode a StartClean_Request: one CleanItem per room, in order."""
+        fan = fan_level or self.state.fan_level or FanLevel.NORMAL
+        mop = mop_humidity or self.state.mop_humidity or MopHumidity.NORMAL
+        vacuum = mode in (CleanMode.VACUUM_ONLY, CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP)
+        mopping = mode in (CleanMode.MOP_ONLY, CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP)
+        # Passes go in the field matching the mode (CleanTask.CleanParam).
+        times: dict[str, int] = {
+            CleanMode.VACUUM_ONLY: {"sweepTime": passes},
+            CleanMode.MOP_ONLY: {"mopTime": passes},
+            CleanMode.VACUUM_AND_MOP: {"sweepMopSyncTime": passes},
+            CleanMode.VACUUM_THEN_MOP: {"sweepTime": passes, "mopTime": passes},
+        }[mode]
+        items = []
+        for order, room_id in enumerate(room_ids, start=1):
+            items.append({
+                "zone": {"zoneType": "ZONE_TYPE_ROOM", "zoneId": room_id},
+                "param": {
+                    "mode": CLEAN_MODE_LABEL[mode],
+                    "fanLevel": fan.value if vacuum else None,
+                    "mopHumidity": mop.value if mopping else None,
+                    **times,
+                },
+                "order": order,
+            })
+        task: dict[str, Any] = {"items": items, "taskType": "TASK_TYPE_CUSTOM_CLEAN"}
+        if self.state.map and self.state.map.map_id:
+            task["mapId"] = self.state.map.map_id
+        return encode("StartClean_Request", {"task": task})
+
+    async def start_clean(
+        self,
+        room_ids: list[int] | None = None,
+        mode: CleanMode = CleanMode.VACUUM_AND_MOP,
+        fan_level: FanLevel | None = None,
+        mop_humidity: MopHumidity | None = None,
+        passes: int = 1,
+    ) -> CommandResponse:
+        """Start cleaning the given rooms (all known rooms if none given)."""
+        await self.notify_active()
+        if not room_ids:
+            if not self.state.rooms or self.state.map is None:
+                await self.fetch_rooms()
+            room_ids = [
+                r.room_id for r in self.state.rooms
+                if r.room_id not in self.state.no_go_room_ids
+            ]
+        if not room_ids:
+            raise NarwalCommandError("Cannot start: no rooms known yet (map not loaded)")
+        request = self.build_clean_request(room_ids, mode, fan_level, mop_humidity, passes)
+        return await self.send_command(TOPIC_CMD_START_CLEAN, request)
+
+    # ------------------------------------------------------------------
+    # Teardown / discovery
+    # ------------------------------------------------------------------
 
     async def disconnect(self) -> None:
-        """Disconnect from MQTT broker.
-
-        Does NOT flip device_reachable / fire a notification: the only
-        callers are (a) planned reconnects, which call connect() right
-        after, and (b) HA unload, which is tearing entities down. For
-        unexpected broker-side disconnects, _on_disconnect still fires
-        and handles the availability change.
-        """
+        """Disconnect without flipping availability (planned reconnect/unload)."""
         client = self._client
         self._client = None
         self._connected.clear()
@@ -634,26 +617,23 @@ class NarwalClient:
             client.on_message = None
             client.on_disconnect = None
             client.on_subscribe = None
-            client.on_log = None
             loop = asyncio.get_running_loop()
             try:
                 await asyncio.wait_for(
-                    loop.run_in_executor(None, self._stop_mqtt_client, client),
-                    timeout=5.0,
+                    loop.run_in_executor(None, self._stop_mqtt_client, client), timeout=5.0,
                 )
             except TimeoutError:
                 _LOGGER.warning("MQTT disconnect timed out — forcing cleanup")
                 try:
-                    client.loop_stop(force=True)
-                except Exception:
+                    client.loop_stop()
+                except Exception:  # noqa: BLE001
                     pass
 
     @staticmethod
     def _stop_mqtt_client(client: mqtt.Client) -> None:
-        """Stop the paho-mqtt network loop and disconnect (blocking)."""
         try:
             client.disconnect()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         client.loop_stop()
 
@@ -666,22 +646,16 @@ class NarwalClient:
         port: int = MQTT_PORT,
         timeout: float = 10.0,
     ) -> list[str]:
-        """Connect to MQTT and discover device names by listening for broadcasts.
-
-        Subscribes to /{product_key}/+/# and returns a list of unique
-        device names seen in incoming message topics.  Blocking call.
-        """
+        """Listen on /{product_key}/+/# and return device names seen (blocking)."""
         discovered: list[str] = []
         found_event = threading.Event()
-
         client = mqtt.Client(
             client_id=f"app_{user_uuid}_{uuid.uuid4()}",
             protocol=mqtt.MQTTv5,
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
         )
         client.username_pw_set(user_uuid, mqtt_password)
-        ctx = ssl.create_default_context()
-        client.tls_set_context(ctx)
+        client.tls_set_context(ssl.create_default_context())
 
         def on_connect(cl, ud, flags, rc, props=None):
             if str(rc) == "Success" or rc == 0:
@@ -689,25 +663,41 @@ class NarwalClient:
 
         def on_message(cl, ud, msg):
             parts = msg.topic.split("/")
-            # Topic format: /{product_key}/{device_name}/...
-            if len(parts) >= 3 and parts[1] == product_key:
-                dev = parts[2]
-                if dev and dev not in discovered:
-                    discovered.append(dev)
-                    _LOGGER.info("Discovered MQTT device: %s", dev)
-                    found_event.set()
+            if len(parts) >= 3 and parts[1] == product_key and parts[2] not in discovered:
+                discovered.append(parts[2])
+                found_event.set()
 
         client.on_connect = on_connect
         client.on_message = on_message
-
         try:
             client.connect(broker, port, keepalive=30)
             client.loop_start()
             found_event.wait(timeout=timeout)
-        except Exception:
+        except Exception:  # noqa: BLE001
             _LOGGER.debug("MQTT discovery failed", exc_info=True)
         finally:
             client.loop_stop()
             client.disconnect()
-
         return discovered
+
+
+_FAN_LABELS = {
+    "FAN_LEVEL_MUTE": FanLevel.QUIET,
+    "FAN_LEVEL_NORMAL": FanLevel.NORMAL,
+    "FAN_LEVEL_STRONG": FanLevel.STRONG,
+    "FAN_LEVEL_DEEP": FanLevel.DEEP,
+    "FAN_LEVEL_SUPER": FanLevel.MAX,
+}
+
+
+def _device_info_version(body: bytes) -> str:
+    """common/get_device_info reply: field 3 holds the firmware text."""
+    from .proto import iter_fields
+
+    try:
+        for num, wire, value in iter_fields(body):
+            if num == 3 and wire == 2:
+                return value.decode(errors="replace")
+    except ProtoError:
+        pass
+    return ""

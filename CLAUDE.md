@@ -13,6 +13,10 @@
 - Use `from __future__ import annotations` in all modules.
 - Follow Home Assistant coding standards for entity classes.
 
+## Tests
+
+Run `pytest` (Python 3.14, `pip install -r requirements_test.txt`). The tests load the integration in Home Assistant against a fake robot (`tests/conftest.py`) that answers with schema-encoded messages; extend `FakeRobot` when adding commands. CI runs them on every pull request.
+
 ## Git Commit Messages
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):
@@ -57,29 +61,38 @@ A GitHub Actions workflow automatically creates the git tag and GitHub release w
 ## Narwal Protocol Notes
 *Applies to: `custom_components/narwal/narwal_client/**/*.py`*
 
-### Deep sleep behavior
+### Source of truth: the app's schema
 
-The vacuum maintains its MQTT broker connection during deep sleep but does NOT process incoming commands. Publishes succeed (`rc=0`) but no response arrives. This is NOT a token/connection issue — the device is simply not listening. No amount of reconnecting will help; wait for it to wake.
+Field numbers and enums come from the official Narwal app's message definitions, generated into `narwal_client/schema.py` (see `tools/schema/README.md` to regenerate). Never hand-number protobuf fields: build and read messages with `narwal_client/proto.py` (`encode("SetConfig_Request", {...})`, `decode("RobotBaseStatus", payload)`). Full reference: `PROTOCOL_REFERENCE.md`.
 
-### Token expiry
+### Framing
 
-The JWT access token (used as MQTT password) expires. The broker may silently stop routing responses before the calculated expiry time. Track consecutive command failures and force token refresh + reconnect after 3 failures.
+Request = Narwal frame (`0x01` + varint(len) + `{1: uuid, 2: uuid}`) + encoded request message appended after the frame. Responses and pushes use the same frame; skip all of it before decoding. Most responses carry `result` (`ServiceResult`, 1 = success).
 
-### Two status paths
+### Status
 
-- `status/robot_base_status` — contains `WorkingStatus` enum, battery, boolean flags (`is_cleaning`, `is_paused`, `is_returning`, `is_docked`). Sent as push broadcast AND as command response to `status/get_device_base_status`.
-- `status/working_status` — contains ONLY `elapsed_time` (field 3) and `cleaned_area` (field 13). Does NOT contain `WorkingStatus` enum. Sent only during active cleaning.
+- `status/robot_base_status` push / `GetDeviceBaseStatus_Response.robotBaseStatus` = `RobotBaseStatus`: battery (2), `robotTaskStatus` (3), `fanLevel` (26), `mopHumidity` (29), tank/dust bin/detergent states, `errorCode` (1).
+- `robotTaskStatus` = `task` (task TYPE: 1 idle, 2 sweep, 10 recall, 17 composite clean, …) + one task-specific sub-status + `pauseStatus` (field 2). Pause is that flag, not a task type. There is no single "WorkingStatus" enum — the old code misread task types 2 (sweep) as paused and 10 (recall) as docked.
+- `status/working_status` = `WorkingStatus`: `coveredArea` (2, m²), `timeConsuming` (3), `remainedTime` (4), `cleaningZoneId` (6). Field 13 is a dust-bag timer, not area.
+
+### Commands
+
+- Room clean: `clean/start_clean` with `StartClean_Request.task` = `CleanTask`, one `CleanItem` per room, `CleanParam` from **CleanTask.pb** (mode, fanLevel, mopHumidity, sweepTime/mopTime/sweepMopSyncTime), `taskType = TASK_TYPE_CUSTOM_CLEAN`. A second message named `CleanParam` exists in ReportBaseTypes.pb — don't use it.
+- Rooms the map marks no-go (`ForbiddenArea` with `FORBIDDEN_MODE_ROOM`) make the robot refuse the whole task; skip them for whole-house cleans.
+- `clean/set_fan_level` / `clean/set_mop_humidity` are only accepted during a clean; while docked, store the choice and send it in the next task. Fan levels: 1 quiet … 3 strong, 5 max (0 = unspecified).
+- Settings: `config/get` / `config/set` share field names but NOT numbers (e.g. `disturbMode` is 4 in Get, 5 in Set). Explicit `false` must be sent to turn a setting off.
+
+### Deep sleep and token expiry
+
+The vacuum keeps its MQTT connection in deep sleep but ignores commands (publish succeeds, no reply). Re-send `active_robot_publish` to wake it; the client retries a timed-out command once. Separately, the broker may stop routing near JWT expiry: after 3 consecutive failures, refresh the token and reconnect.
 
 ### Explicit subscriptions only
 
-Narwal's Aliyun IoT broker accepts wildcard subscriptions (e.g. `base_topic/#`) but does NOT route messages through them — only EXPLICIT topic subscriptions get messages delivered.
+The Aliyun IoT broker accepts wildcard subscriptions but only delivers to explicit ones. `_on_connect` subscribes each push topic and pre-subscribes every command's `/response` topic; `_ensure_subscribed` covers any other command. Don't replace these with wildcards.
 
-- `_on_connect` subscribes to each broadcast topic individually (`status/robot_base_status`, `status/working_status`).
-- `_send_command_locked` subscribes to the specific `{topic}/response` before each publish and waits briefly for SUBACK. Do not remove these per-command subscribes — without them responses won't arrive.
+### Map
 
-### Map data
-
-Map grid is zlib-compressed protobuf containing packed repeated varints. Each pixel: `room_id = val >> 8`, `pixel_type = val & 0xFF`. Map Y-axis is flipped (mathematical coords → image coords).
+`StaticMapPayload`: grid in `mapData` (zlib/gzip, packed varints, `room_id = v >> 8`, bottom row first — flip vertically). Poses (station, robot, `DisplayMap.robot`) are in grid-cell units: `pixel = pose - border.left/bottom`. `rotateAngle` is clockwise.
 
 ---
 
@@ -113,7 +126,7 @@ All MQTT and SSL operations must run in executors. HA detects blocking calls (`s
 
 ### Broadcast registration
 
-The vacuum only sends push broadcasts after receiving `active_robot_publish`. Re-send this every poll cycle — the vacuum may have woken from deep sleep since the last send and doesn't know about us.
+The vacuum only sends pushes while an app client is registered via `active_robot_publish` (publish window 60 s). The coordinator re-sends it on its own 50 s timer, independent of the poll interval, and the client re-sends it before retrying a timed-out command (the vacuum may have woken from deep sleep and not know about us).
 
 ---
 
@@ -144,4 +157,4 @@ The editor element must NOT use shadow DOM — append directly to `this` (not `t
 
 ### Entity resolution
 
-Support explicit config AND auto-detection fallback for all entities (camera, battery sensor, mode select). Search `hass.states` for `*narwal*` patterns as fallback.
+Support explicit config AND auto-detection for all related entities. Auto-detect through the vacuum's device: find entities in `hass.entities` with the same `device_id` and the integration's `translation_key` (`map`, `battery`, `clean_mode`, `mop_humidity`, `error`, `consumables_due`, `dry_mop`, …). Entity IDs vary per install (the clean-mode select may be `select.narwal_<key>` with no `clean_mode` in it), so matching `*narwal*` names in `hass.states` is only a last-resort fallback.
