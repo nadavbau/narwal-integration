@@ -1,10 +1,10 @@
 # Narwal Freo X Ultra — Protocol & Data Reference
 
-Comprehensive reference for the Narwal vacuum's cloud API, MQTT protocol,
-protobuf message formats, and Home Assistant integration specifics. All
-information was reverse-engineered from live traffic captures (MITM proxy,
-paho-mqtt packet traces) and validated against a real Narwal Freo X Ultra
-robot during March 2026.
+Reference for the Narwal vacuum's cloud API, MQTT protocol and protobuf
+messages. Transport details come from live traffic captures; message
+layouts (§3 onward) come from the message definitions compiled into the
+official Narwal Android app, and every behaviour marked "live" was checked
+against a real Freo X Ultra (firmware v01.09.01.00).
 
 ---
 
@@ -110,38 +110,38 @@ Example:
 
 ### Subscription Model
 
-On connect, subscribe to `/{product_key}/{device_name}/#` (QoS 1) to receive
-all push broadcasts. For command responses, the client **also** explicitly
-subscribes to the specific `/response` topic before publishing.
+The broker (Aliyun IoT) accepts wildcard subscriptions but only delivers
+messages to **explicit** topic subscriptions. On connect the client
+subscribes to each push topic (`status/robot_base_status`,
+`status/working_status`, `map/display_map`, `status/upgrade_status`) and
+pre-subscribes the `/response` topic of every command it uses.
 
-**Important**: The broker uses ACLs. Wildcard subscriptions like
-`/{product_key}/+/#` work for discovery but individual device topics
-require the correct device_name.
+The broker enforces ACLs per device name: the wrong device name makes every
+command time out silently.
 
 ### Command/Response Pattern
 
-1. Subscribe to `{base_topic}/{command}/response` (QoS 1)
-2. Wait for SUBACK (timeout 5s)
-3. Publish to `{base_topic}/{command}` with MQTT5 properties:
+1. Make sure `{base_topic}/{command}/response` is subscribed (pre-subscribed
+   on connect; otherwise subscribe and wait for SUBACK)
+2. Publish to `{base_topic}/{command}` with MQTT5 properties:
    - `ResponseTopic`: the response topic string
    - `CorrelationData`: protobuf with request UUID, zero, and timestamp
-4. Wait for response on the response topic (timeout varies by command)
+3. Wait for the reply on the response topic (timeout varies by command)
 
 ### Payload Framing (Narwal Frame)
 
 All payloads use a custom framing: `0x01 + varint(inner_length) + inner_protobuf`
 
-The inner protobuf always starts with the user identity:
-- Field 1 (string): user_uuid
-- Field 2 (string): user_uuid (duplicate for backward compat?)
-- Additional command-specific fields follow
+The framed protobuf is the user identity: field 1 and field 2 are both the
+user UUID. The command's request message (§3) is appended **after** the
+frame, not inside it.
 
 ### Response Framing
 
-Responses also use the `0x01 + varint + protobuf` frame. After stripping
-the frame, the response protobuf contains:
-- Field 1 (varint): result code (1=SUCCESS, 2=NOT_APPLICABLE, 3=CONFLICT)
-- Field 2 (bytes): response data payload (command-specific protobuf)
+Responses and pushes use the same frame. Skip the whole frame
+(`0x01`, the length varint and that many bytes); what follows is the
+response message, e.g. `GetDeviceBaseStatus_Response` or a generic
+`{1: result}` where `result` is the `ServiceResult` enum (§4).
 
 ### CorrelationData Format
 
@@ -159,575 +159,311 @@ can run concurrently without issues.
 
 ---
 
-## 3. Command Topics
 
-### General
+## 3. Message Schema
 
-| Topic                          | Timeout | Description                            |
-|--------------------------------|---------|----------------------------------------|
-| `common/yell`                  | 10s     | Locate — robot plays a sound           |
-| `common/reboot`                | 10s     | Reboot the robot                       |
-| `common/shutdown`              | 10s     | Shut down the robot                    |
-| `common/get_device_info`       | 10s     | Get device info (firmware, model)      |
-| `common/get_feature_list`      | 10s     | Get supported features                 |
-| `common/active_robot_publish`  | —       | Tell robot an app client is active (fire-and-forget, triggers push broadcasts) |
-| `common/notify_app_event`      | 10s     | Notify app event                       |
+Payloads are protobuf. Field numbers, types and enum values come from the
+message definitions compiled into the official Android app
+(`com.narwal.pita_global`, 2.11.90), recovered by decompiling its Dart code
+(see `tools/schema/README.md`). They are **not guesses** — do not renumber
+anything by hand.
 
-### Status
+- `custom_components/narwal/narwal_client/schema.py` — generated subset of the
+  app's schema (the messages the integration uses). Regenerate, don't edit.
+- `custom_components/narwal/narwal_client/proto.py` — encode/decode dicts keyed
+  by the app's field names: `encode("SetConfig_Request", {"childLockEnabled": True})`,
+  `decode("RobotBaseStatus", payload)`. Enums decode to their label strings.
 
-| Topic                             | Timeout | Description                         |
-|-----------------------------------|---------|-------------------------------------|
-| `status/get_device_base_status`   | 10s     | Request current status + battery    |
+Message names below are the app's. Where two app files define a message
+with the same name, the generated schema qualifies it with the file stem
+(e.g. `CleanParam__CleanTask` vs `CleanParam__ReportBaseTypes`). The clean
+task uses the **CleanTask.pb** one; confusing the two was the root of the old
+room-cleaning bugs.
 
-### Task Control
+Every request is `[Narwal frame] + encoded request message`; every response
+is `[Narwal frame] + encoded response message` (see §2).
 
-| Topic            | Timeout | Description                  |
-|------------------|---------|------------------------------|
-| `task/pause`     | 10s     | Pause current task           |
-| `task/resume`    | 10s     | Resume paused task           |
-| `task/force_end` | 10s     | Force stop current task      |
-| `task/cancel`    | 10s     | Cancel current task          |
+## 4. Commands
 
-### Cleaning
+Over 300 command topics exist in the app; these are the ones the
+integration uses. "Live" = verified against a Freo X Ultra (firmware
+v01.09.01.00).
 
-| Topic                          | Timeout | Description                           |
-|--------------------------------|---------|---------------------------------------|
-| `clean/start_clean`            | 10s     | Start cleaning (requires clean config payload OUTSIDE the Narwal frame) |
-| `clean/plan/start`             | 10s     | Legacy plan start (returns NOT_APPLICABLE — use `clean/start_clean` instead) |
-| `clean/easy_clean/start`       | 10s     | Start easy/quick clean                |
-| `clean/set_fan_level`          | 10s     | Set vacuum fan speed                  |
-| `clean/set_mop_humidity`       | 10s     | Set mop wetness level                 |
-| `clean/current_clean_task/get` | 10s     | Get current cleaning task info        |
+| Topic | Request → Response | Notes |
+|-------|--------------------|-------|
+| `common/active_robot_publish` | `ActiveRobotPublish_Request` (no reply) | Registers an app client; robot pushes status every `topicsDuration` ms for `publishDuration` ms. Re-send every ~50 s. Live |
+| `status/get_device_base_status` | — → `GetDeviceBaseStatus_Response` | `{result: RESULT_TYPE_SUCCESS, robotBaseStatus}`. Live |
+| `common/get_feature_list` | — → `GetFeatureList_Response` | Feature flags. Live |
+| `common/upgrade/get_firmware_version` | — → `GetFirmwareVersion_Response` | `firmwareVersionText`. `common/get_device_info` field 3 also holds it |
+| `config/get` | — → `GetConfig_Response` | `config` = settings (§5.5). Live |
+| `config/set` | `SetConfig_Request` → `SetConfig_Response` | Send only the fields to change; **explicit `false`/0 is honoured**. Field numbers differ from `GetConfig` (§5.5). Live |
+| `consumable/get_consumable_info` | — → `GetConsumableInfo_Response` | Items *due* (maintain / replace), not wear percentages. Live |
+| `consumable/reset_consumable_info` | `ResetConsumableInfo_Request` | `consumableInfo.replaceItems: [item]` |
+| `map/get_map` | `GetMap_Request` (optional) → `GetMap_Response` | `map` = `StaticMapPayload` (§6). Live |
+| `clean/start_clean` | `StartClean_Request` → `StartClean_Response` | §5.6. Live |
+| `clean/set_fan_level` | `SetFanLevel_Request` | `{level, operationType: OPERATION_TYPE_SET_VALUE}`. **Only accepted during a clean** (GENERAL_FAILED while docked). Live |
+| `clean/set_mop_humidity` | `SetMopHumidity_Request` | `{mopHumidity, operationType}`. Only during a clean. Live |
+| `task/pause` / `task/resume` / `task/force_end` / `task/cancel` | empty | Live (pause/resume/force_end) |
+| `supply/recall` | empty | Return to dock. Live |
+| `supply/dry_mop`, `supply/wash_and_dry_mop`, `supply/dust_gathering` | empty | Live |
+| `supply/wash_mop` | empty | Rejected while idle on the dock (mid-clean wash) |
+| `common/yell` | empty | Locate. Live |
 
-**`clean/start_clean` payload** — the auth frame is sent first, then a clean
-configuration protobuf is appended **OUTSIDE** (after) the Narwal frame:
+Most responses carry `result` (enum `ServiceResult`) in field 1:
+`SERVICE_RESULT_PERFORM_SUCCESS` = 1; failures include
+`PERFORM_GENERAL_FAILED` (2), `ALREADY_EXECUTING` (3), `POWER_LOWER` (4),
+`ROBOT_IN_STATION_WHEN_RECALL` (6), `DUST_BOX_NOT_INSTALLED` (9),
+`MOP_NOT_INSTALLED` (10), `FORBIDDEN_TASK_IF_CAN_NOT_REACH_SPECIFIED_AREA` (18)
+… (`const.py` → `SERVICE_RESULT_MESSAGES` has readable text). Read-only
+commands may omit `result`.
+
+### Deep sleep and timeouts
+
+The robot keeps its MQTT connection while in deep sleep but ignores
+commands: publishes succeed, no reply arrives. Re-sending
+`active_robot_publish` wakes it; the client retries a timed-out command once
+after that. Repeated timeouts are not a token problem — but the broker can
+also silently stop routing when the JWT nears expiry, so after 3 consecutive
+failures the coordinator refreshes the token and reconnects.
+
+## 5. Status and Requests
+
+### 5.1 `RobotBaseStatus` (push `status/robot_base_status`, and inside `GetDeviceBaseStatus_Response`)
+
+| Field | Name | Notes |
+|-------|------|-------|
+| 1 | `errorCode` (repeated `ErrorCode`) | `{identityCode, level, debugDetail}`; an empty entry = no error. Codes → `error_codes.py` |
+| 2 | `batteryPercentage` | float32 |
+| 3 | `robotTaskStatus` | §5.2 |
+| 11 | `stationContactType` | `NOT_CONTACTED` / `CONTACTED` / `CHARGING` |
+| 12 | `detergentState` | `INSTALLED_AND_NOT_EMPTY`, `INSTALLED_AND_EMPTY`, `RUNNING_OUT`, … |
+| 15 | `terminateReason` | `TaskResult` of the last task |
+| 16 | `autoAddDetergentEnabled` | bool |
+| 20 / 23 / 24 | `dustBoxState` / `cleanWaterTankState` / `sewageTankState` | |
+| 26 | `fanLevel` | `FanLevel` |
+| 29 | `mopHumidity` | `MopHumidity` |
+| 30 | `mapId` | |
+| 32 | `robotTaskStatusList` | parallel tasks (e.g. drying while idle) |
+| 47 | `chargingStatus` | `CHG_STATUS_CHARGING`, `_FULL`, `_NOT_CHARGING`, … |
+
+### 5.2 `RobotTaskStatus` — what the robot is doing
+
+`task` (field 1, enum `RobotTaskStatus_TaskType`) plus **one** task-specific
+sub-status field, plus `pauseStatus` (field 2, bool).
+
+| Value | `task` | Sub-status field |
+|-------|--------|------------------|
+| 1 | `TASK_TYPE_IDLE` | `idleStatus`: `IN_STATION`, `LOW_POWER_IN_STATION` (asleep on dock), `OUTSIDE_STATION`, … |
+| 2–6 | `SWEEP`, `MOP`, `SWEEP_THEN_MOP`, `SWEEP_AND_MOP`, `SMART_CLEAN` | `sweepStatus`, `mopStatus`, … (`ROOM_CLEAN`, `REGION_CLEAN`, `AUTO_RECALL_TO_WASH`, `WAITING_COMMAND`, …) |
+| 7 | `BUILD_MAP` | `buildMapStatus` |
+| 10 | `RECALL` | `recallStatus`: `BACK_TO_STATION`, `PARKING`, `RELOCALIZATION` |
+| 14 | `WASH_AND_DRY_MOP` | `washAndDryStatus`: `WASH`, `DRY`, … |
+| 17 | `COMPOSITE_CLEAN` | `compositeCleanStatus`: `SELF_CHECK`, `DEPARTURE`, `ROOM_SWEEP`, `ROOM_SWEEP_AND_MOP`, `AUTO_WASH`, … — **room cleans started with `clean/start_clean` report this** |
+| 19 | `DUST_GATHERING` | `dustGatheringStatus` |
+| 28 | `WAITING_COMMAND` | |
+
+Full list: `RobotTaskStatus_TaskType` in `schema.py`. Mapping to HA
+activity (`models.py` → `NarwalState.activity`):
+
+- `pauseStatus` true, or a `*_WAITING_COMMAND` sub-status → **paused**
+- cleaning-type task with a `RECALL`/`BACK_TO_STATION`/`PARKING` sub-status, or `RECALL`/`PARKING` task → **returning**
+- cleaning-type task → **cleaning**
+- `WASH_AND_DRY_MOP`, `DUST_GATHERING`, `DRY_STATION_BAG` → **docked**
+- `IDLE` → **docked** if on the station (`stationContactType` or `idleStatus`), else **idle**
+- `IDLE` with a non-empty `errorCode` → **error**
+
+The old integration treated field 3.1 as a single "WorkingStatus" enum
+(2 = paused, 10 = docked …). Those values are task types: 2 is vacuuming and
+10 is returning.
+
+### 5.3 `WorkingStatus` (push `status/working_status`)
+
+| Field | Name | Notes |
+|-------|------|-------|
+| 1 | `workingProgress` | float; 0–1 or 0–100 depending on firmware |
+| 2 | `coveredArea` | float, m² |
+| 3 | `timeConsuming` | s |
+| 4 | `remainedTime` | s |
+| 6 | `cleaningZoneId` | room being cleaned |
+| 8–17 | drying / dust-bag timers | field 13 is `totalDryStationBagTime`, **not** cleaned area |
+
+Keeps arriving (frozen) after a task ends; use `RobotBaseStatus` for state.
+
+### 5.4 Enums used in requests
+
+| Enum | Values |
+|------|--------|
+| `FanLevel` | 1 MUTE (Quiet), 2 NORMAL, 3 STRONG, 4 DEEP, 5 SUPER (Max). 0 = unspecified |
+| `MopHumidity` | 1 DRY, 2 NORMAL, 3 WET |
+| `CleanMode` | 1 SMART, 2 SWEEP, 3 MOP, 4 SWEEP_MOP_SYNC, 5 SWEEP_THEN_MOP, 6 COMPOSITE_CLEAN |
+| `ZoneType` | 1 ROOM, 2 ZONE, 3 WHOLE_MAP |
+| `TaskType` (CleanTask) | 1 GENERAL_SWEEP … 5 CUSTOM_CLEAN, 7 SCHEDULED |
+
+### 5.5 Settings: `GetConfig_Response.config` vs `SetConfig_Request`
+
+Same field **names**, different **numbers** — always go through `proto.py`.
+
+| Setting | Get # | Set # |
+|---------|-------|-------|
+| `volumePercentage` | 1 | 1 |
+| `disturbMode` `{enabled, beginTime, endTime}` (seconds after midnight) | 4 | 5 |
+| `autoAddDetergentEnabled` | 6 | 7 |
+| `childLockEnabled` | 7 | 8 |
+| `cleanCarpetEnabled` | 8 | 9 |
+| `dryMopStrength` (`QUIET`/`STRONG`/`SMART`) | 12 | 13 |
+| `cleanMopFreq` (`EFFICIENT`/`NORMAL`/`DEEP`) | 13 | 14 |
+| `carpetCleanOption` (`ACROSS`/`PRESSURE`/`IGNORE`/`AVOID`) | 15 | 15 |
+| `petMode` | 22 | 22 |
+| `smartDeepCleanEnabled` | 23 | 23 |
+| `dustGatheringEnabled` (auto-empty) | 27 | 27 |
+| `quietDustGatheringEnabled` | 30 | 30 |
+| `hotWaterWashEnabled` | 32 | 32 |
+
+Proto3: an absent bool reads as false.
+
+### 5.6 Starting a clean — `StartClean_Request`
 
 ```
-[Narwal frame: 0x01 + varint_len + auth_protobuf]
-[Clean config protobuf (field 1 sub-message)]
+StartClean_Request
+  1 task: CleanTask
+      1 mapId                (from the map, usually 1)
+      2 items: CleanItem     (repeated — ONE PER ROOM)
+          1 zone: ZoneOption
+              1 zoneType = ZONE_TYPE_ROOM
+              2 zoneId   = <room id>
+          2 param: CleanParam (CleanTask.pb)
+              1 mode        = CleanMode (SWEEP / MOP / SWEEP_MOP_SYNC / SWEEP_THEN_MOP)
+              2 fanLevel    = FanLevel     (when vacuuming)
+              4 mopHumidity = MopHumidity  (when mopping)
+              5 sweepTime / 6 mopTime / 7 sweepMopSyncTime = passes for that phase
+          3 order = 1, 2, …
+      5 taskType = TASK_TYPE_CUSTOM_CLEAN
 ```
 
-The clean config structure (field numbers relative to the outer message):
-```
-field 1 (sub-message) {           // CleanConfig
-  field 1 = 1                     // selective clean flag
-  field 2 (sub-message) {         // RoomList
-    field 1 (sub-message) {       // GlobalConfig: {1:1, 2:passes}
-      field 1 = 1
-      field 2 = <passes>          // number of cleaning passes (default: 2)
-    }
-    field 2 (sub-message, repeated) {  // RoomEntry (one per room)
-      field 1 = <room_id>
-      field 2 = <passes>
-      field 3 = <vacuum_on>       // 1=on, 0=off
-      field 4 = <mop_on>          // 1=on, 2=off
-      field 5 = <fan_level>       // 0=quiet, 1=normal, 2=strong, 3=max
-      field 6 = <mop_humidity>    // 0=dry, 1=normal, 2=wet
-      field 7 = 1
-      field 8 = 1
-      field 9 = 1
-      field 10 = 0
-    }
-    field 3 = 1
-  }
-  field 3 = 1
-  field 4 (sub-message) { field 1=1, field 5=0 }
-  field 5 = 1
-}
-```
-
-`clean/plan/start` is **not recommended** — it returns NOT_APPLICABLE (code=2)
-on Freo X Ultra and likely other newer models.
-
-### Dock/Supply
-
-| Topic                  | Timeout | Description                  |
-|------------------------|---------|------------------------------|
-| `supply/recall`        | 10s     | Return to dock               |
-| `supply/wash_mop`      | 10s     | Wash the mop pads            |
-| `supply/dry_mop`       | 10s     | Dry the mop pads             |
-| `supply/dust_gathering` | 10s    | Empty the dustbin            |
-
-### Map
-
-| Topic                       | Timeout | Description                    |
-|-----------------------------|---------|--------------------------------|
-| `map/get_map`               | 30s     | Get full map (large response)  |
-| `map/get_all_reduced_maps`  | 10s     | Get all saved maps (reduced)   |
-
-### Config
-
-| Topic              | Timeout | Description               |
-|--------------------|---------|---------------------------|
-| `config/get`       | 10s     | Get current configuration |
-| `config/set`       | 10s     | Set configuration values  |
-| `config/volume/set`| 10s     | Set speaker volume        |
-
-### Consumables
-
-| Topic                            | Timeout | Description                   |
-|----------------------------------|---------|-------------------------------|
-| `consumable/get_consumable_info` | 10s     | Get consumable wear levels    |
-| `consumable/reset_consumable_info`| 10s    | Reset consumable counter      |
-
-### Schedule
-
-| Topic                        | Timeout | Description                |
-|------------------------------|---------|----------------------------|
-| `schedule/clean_schedule/get`| 10s     | Get cleaning schedule      |
-
----
-
-## 4. Push Broadcast Topics (Robot → Client)
-
-These are unsolicited messages pushed by the robot:
-
-| Topic Suffix                    | Description                        |
-|---------------------------------|------------------------------------|
-| `status/robot_base_status`      | Status + battery (periodic + on change) |
-| `status/working_status`         | Cleaning progress (during active clean) |
-| `status/upgrade_status`         | Firmware update status             |
-| `map/display_map`               | Real-time robot position during cleaning (~1.5s interval) |
-
-The robot starts sending broadcasts after receiving `common/active_robot_publish`.
-
----
-
-## 5. Protobuf Message Formats
-
-All messages use custom protobuf (not compiled from .proto files — reverse
-engineered). Our parser handles wire types 0 (varint), 1 (64-bit), 2
-(length-delimited), and 5 (32-bit fixed).
-
-### 5.1 `status/robot_base_status` (base status)
-
-Field 2 of the response data (or pushed broadcast after frame stripping):
-
-| Field | Wire Type | Description                                    |
-|-------|-----------|------------------------------------------------|
-| 2     | 5 (fixed32) | Battery level as IEEE 754 float32 (e.g., `1118175232` → `83.0%`) |
-| 3     | 2 (LEN)  | Sub-message: working state (see below)         |
-| 11    | 0 (varint) | Dock indicator: 2=docked, 1=undocked          |
-| 13    | 2 (LEN)  | User UUID (string)                             |
-| 36    | 0 (varint) | Timestamp                                     |
-| 38    | 0 (varint) | Battery health (always 100, design capacity)  |
-| 47    | 0 (varint) | Dock indicator: 3=docked, 2=undocked          |
-
-**Field 3 sub-message (working state)**:
-
-| Sub-Field | Description                                       |
-|-----------|---------------------------------------------------|
-| 1         | WorkingStatus enum (see below)                    |
-| 2         | is_paused: 1 = paused                             |
-| 3         | dock_presence: 1/6=on dock, 2=off dock            |
-| 7         | is_returning: 1 = returning to dock               |
-| 10        | dock_sub_state: 1=docked, 2=docking in progress   |
-| 12        | dock_activity: values 2, 6 when docked            |
-
-**Note**: Field 32 mirrors field 3 exactly (redundant).
-
-### 5.2 WorkingStatus Enum
-
-| Value | Name             | HA Activity   |
-|-------|------------------|---------------|
-| 0     | UNKNOWN          | idle          |
-| 1     | STANDBY          | idle          |
-| 2     | PAUSED           | paused        |
-| 3     | SLEEPING         | idle          |
-| 4     | CLEANING         | cleaning      |
-| 5     | CLEANING_ALT     | cleaning      |
-| 6     | RETURNING        | returning     |
-| 7     | CHARGING         | docked        |
-| 8     | MOP_WASHING      | docked        |
-| 9     | MOP_DRYING       | docked        |
-| 10    | DOCKED           | docked        |
-| 11    | DUST_COLLECTING  | docked        |
-| 12    | UPGRADING        | idle          |
-| 13    | SELF_CHECK       | idle          |
-| 14    | CHARGED          | docked        |
-| 99    | ERROR            | error         |
-
-Dock detection for STANDBY/UNKNOWN uses multiple signals: `dock_sub_state==1`,
-`dock_activity>0`, `dock_field11==2`, or `dock_field47==3`.
-
-### 5.3 `status/working_status` (cleaning progress)
-
-| Field | Description                        |
-|-------|------------------------------------|
-| 3     | Elapsed time (seconds)             |
-| 13    | Cleaned area (cm²; 18000 = 1.8m²) |
-| 15    | Unknown (600 during cleaning)      |
-
-### 5.4 Battery Decoding
-
-Battery is field 2 of base_status, wire type 5 (fixed32). The raw uint32
-must be reinterpreted as IEEE 754 float32:
-
-```python
-import struct
-battery = struct.unpack('<f', struct.pack('<I', raw_uint32))[0]
-```
-
-Example: `1118175232` → `83.0%`
-
----
-
-## 6. Map Data Format
-
-### 6.1 `map/get_map` Response
-
-The response data (field 2 of the command response protobuf) contains:
-
-| Field | Wire Type | Description                                    |
-|-------|-----------|------------------------------------------------|
-| 1     | 0 (varint) | Always 1                                     |
-| 2     | 0 (varint) | Grid full width (may differ from clipped width — e.g., 228) |
-| 3     | 0 (varint) | Resolution in mm/pixel (e.g., 60)            |
-| 4     | 0 (varint) | **Map grid width** in pixels (e.g., 224)     |
-| 5     | 0 (varint) | **Map grid height** in pixels (e.g., 258)    |
-| 6     | 2 (LEN)  | Coordinate transform (origin offsets)          |
-| 7     | 2 (LEN)  | Robot position                                 |
-| 8     | 2 (LEN)  | Dock position                                  |
-| 9     | 2 (LEN)  | Unknown (52 bytes)                             |
-| 11    | 2 (LEN)  | Unknown                                        |
-| 12    | 2 (LEN)  | **Room list** (REPEATED — see §6.3)           |
-| 13    | 2 (LEN)  | Unknown                                        |
-| 15    | 0 (varint) | Always 1                                     |
-| 17    | 2 (LEN)  | **Compressed map grid** (zlib — see §6.2)     |
-| 18    | 0 (varint) | Unknown (3)                                  |
-| 20    | 0 (varint) | Unknown (63)                                 |
-| 21    | 2 (LEN)  | Unknown                                        |
-| 22    | 0 (varint) | Unknown (101293)                             |
-| 23    | 0 (varint) | Always 1                                     |
-| 24    | 2 (LEN)  | Dock position (duplicate of field 8)           |
-| 25    | 0 (varint) | Unknown (90)                                 |
-| 30    | 0 (varint) | Always 1                                     |
-| 32    | 2 (LEN)  | Furniture/obstacle annotations (537 bytes)     |
-| 33    | 0 (varint) | Map area                                     |
-| 34    | 0 (varint) | Created-at timestamp (epoch seconds)          |
-| 35    | 0 (varint) | Always 1                                     |
-| 36    | 0 (varint) | Unknown large number (nanosecond timestamp?)  |
-
-### 6.2 Map Grid Pixel Format
-
-Field 17 is zlib-compressed. After decompression:
-
-1. **Protobuf wrapper**: byte 0 = `0x0a` (field 1, wire type 2), followed
-   by a varint length, then the actual pixel data.
-2. **Packed varints**: Each pixel is a protobuf varint (1-3 bytes).
-3. **Pixel encoding**: `room_id = value >> 8`, `pixel_type = value & 0xFF`
-
-**Special pixel values**:
-- `0x00` = unknown/outside map (dark background)
-- `0x20` = unassigned floor (light gray)
-- `0x28` = unassigned obstacle (dark gray)
-
-**Room pixels** (value > 0x28):
-- Upper bits (`>> 8`): room_id (1-based, matches field 12 room entries)
-- Lower byte (`& 0xFF`): pixel type
-  - `pixel_type & 0x10` = wall/border edge (render as darker shade)
-  - Otherwise = room floor
-
-**Grid layout**:
-- Pixel index `i`: x = `i % width`, y = `i // width`
-- Y-axis is inverted: grid Y=0 is the bottom of the map (math coordinates)
-- Must `FLIP_TOP_BOTTOM` for correct display orientation
-
-**Dimensions**: Use field 4 (width) and field 5 (height) from the map data.
-Field 2 is a slightly larger width (full grid including padding) — do NOT
-use it for rendering.
-
-**Example**: 224×258 grid, 4535 bytes compressed → 77752 bytes decompressed →
-57792 pixel varints (matches 224×258 exactly).
-
-### 6.3 Room List (Field 12, Repeated)
-
-Field 12 appears **multiple times** in the map protobuf (one per room).
-Standard protobuf parsers that overwrite duplicate fields will only keep
-the last room. Must use `parse_protobuf_repeated()` to collect all entries.
-
-Each field 12 entry is a sub-message:
-
-| Sub-Field | Type    | Description                                    |
-|-----------|---------|------------------------------------------------|
-| 1         | varint  | **room_id** (matches `pixel_value >> 8` in grid) |
-| 2         | varint  | room_sub_type (ROOM_TYPE enum — see below)     |
-| 3         | string  | User-assigned name (UTF-8, empty if not renamed) |
-| 4         | varint  | Category: 1=room, 2=utility/small space        |
-| 8         | varint  | Instance index (1-based, for duplicate room types: "Bathroom 2") |
-
-### 6.4 Room Sub-Type Enum (from APK)
-
-| Value | Name             | Notes                               |
-|-------|------------------|-------------------------------------|
-| 0     | Room             | Generic/unspecified                  |
-| 1     | Master Bedroom   |                                     |
-| 2     | Bedroom          | Secondary bedroom                   |
-| 3     | Living Room      |                                     |
-| 4     | Kitchen          |                                     |
-| 5     | Bathroom         | APK says "Study" — user confirmed Bathroom |
-| 6     | Toilet           | APK says "Bathroom" — user confirmed Toilet |
-| 7     | Dining Room      | APK says "Corridor" but app shows "Dining Room" for some users |
-| 8     | Dining Room      | APK says "Corridor" — user confirmed Dining Room |
-| 9     | Balcony          |                                     |
-| 10    | Utility Room     |                                     |
-| 11    | Study            | APK says "Cloak Room" — user confirmed Study |
-| 12    | Nursery          |                                     |
-| 13    | Recreation Room  |                                     |
-| 14    | Storage Room     | APK says "Shower Room" — user confirmed Storage Room |
-| 15    | Other            |                                     |
-
-**Note**: Sub-types 7, 8, 11, and 14 have discrepancies between the APK
-string table and what the Narwal app actually displays. The values above
-were confirmed by the user against their app's room labels.
-
-### 6.5 Room Display Name Logic
-
-1. If user has renamed the room (field 3 non-empty): use the custom name
-2. Otherwise: look up `room_sub_type` in the ROOM_TYPE table
-3. If `instance_index > 1`: append the index (e.g., "Bathroom 2")
-
----
-
-## 7. Cleaning Modes
-
-### CleanMode Enum
-
-| Value | Name              |
-|-------|-------------------|
-| 1     | Vacuum & Mop      |
-| 2     | Vacuum then Mop   |
-| 3     | Vacuum Only        |
-| 4     | Mop Only           |
-
-### FanLevel Enum
-
-| Value | Name   |
-|-------|--------|
-| 0     | Quiet  |
-| 1     | Normal |
-| 2     | Strong |
-| 3     | Max    |
-
-### MopHumidity Enum
-
-| Value | Name   |
-|-------|--------|
-| 0     | Dry    |
-| 1     | Normal |
-| 2     | Wet    |
-
----
-
-## 8. Protobuf Encoding Helpers
-
-### Varint Encoding
-
-```python
-def _encode_varint(value: int) -> bytes:
-    result = []
-    while value > 0x7F:
-        result.append((value & 0x7F) | 0x80)
-        value >>= 7
-    result.append(value & 0x7F)
-    return bytes(result)
-```
-
-### Field Encoding
-
-```python
-# Varint field (wire type 0)
-tag = (field_num << 3) | 0
-encoded = bytes([tag]) + _encode_varint(value)
-
-# Length-delimited field (wire type 2, for strings/bytes/sub-messages)
-tag = (field_num << 3) | 2
-encoded = bytes([tag]) + _encode_varint(len(data)) + data
-```
-
-### Repeated Fields
-
-Standard protobuf parsers (including ours) overwrite duplicate field
-numbers. For fields that appear multiple times (like room entries in field
-12), use `parse_protobuf_repeated()` which returns `{field_num: [list_of_values]}`.
-
----
+Live-verified. The robot answers
+`FORBIDDEN_TASK_IF_CAN_NOT_REACH_SPECIFIED_AREA` if any room is a no-go room
+(§6.3) — skip those for a whole-house clean. Not yet live-verified: MOP /
+SWEEP_MOP_SYNC / SWEEP_THEN_MOP modes and `FAN_LEVEL_SUPER` inside a task.
+
+## 6. Map
+
+### 6.1 `GetMap_Response.map` = `StaticMapPayload`
+
+| Field | Name | Notes |
+|-------|------|-------|
+| 1 | `mapId` | |
+| 3 | `resolution` | mm per cell (60) |
+| 4 / 5 | `width` / `height` | grid cells |
+| 6 | `border` | `{left, right, top, bottom}` in cells; width = right − left + 1 |
+| 7 / 8 / 24 | `origin` / `station` / `robotPose` | `PoseData {location {x, y}, theta}` |
+| 9 | `forbiddens` | repeated `ForbiddenArea` (§6.3) |
+| 12 | `roomInfos` | repeated `RoomInfo` (§6.4) |
+| 17 | `mapData` | compressed grid (§6.2) |
+| 18 | `mapDataFormat` | `MAP_DATA_FORMAT_COMPRESSED_ON_GZIP` |
+| 25 | `rotateAngle` | display rotation, **clockwise** (90 on the test map) |
+
+### 6.2 Grid
+
+`mapData` is zlib/gzip; inside is `{1: packed varints}`, one varint per cell,
+row-major from the **bottom** row (flip vertically for images).
+`room_id = v >> 8`, `type = v & 0xFF`; `0` unknown, `0x20` unassigned floor,
+`0x28` obstacle, `type & 0x10` room border.
+
+**Poses are in grid-cell units**, not metres:
+`pixel = (pose.x − border.left, pose.y − border.bottom)` (bottom-up). Verified:
+the docked robot lands ~4 cells from a wall, and a mid-clean pose lands in
+the room being cleaned.
+
+### 6.3 No-go rooms — `ForbiddenArea`
+
+`{polygon, type, id, roomId, mode}`. `mode = FORBIDDEN_MODE_ROOM` with
+`type = FORBIDDEN_TYPE_SWEEP_MOP` marks a whole room no-go.
+
+### 6.4 Rooms — `RoomInfo`
+
+`roomId` (1), `type` (2, room kind — table below), `customName` (3, empty if
+not renamed), `roomTypeId` (8, numbering for duplicates, "Bedroom 2").
+
+| type | Name | type | Name |
+|------|------|------|------|
+| 0 | Room | 8 | Dining Room |
+| 1 | Master Bedroom | 9 | Balcony |
+| 2 | Bedroom | 10 | Utility Room |
+| 3 | Living Room | 11 | Study |
+| 4 | Kitchen | 12 | Nursery |
+| 5 | Bathroom | 13 | Recreation Room |
+| 6 | Toilet | 14 | Storage Room |
+| 7 | Dining Room | 15 | Other |
+
+(Names confirmed against the app; some differ from the app's string table.)
+
+### 6.5 Live position — `DisplayMap` (push `map/display_map`)
+
+`robot` (1, `PoseData`), `currentCleanZoneId` (4), `station` (5),
+`robotPoseUpdateTime` (10). Sent every `displayMapDuration` ms while an app
+client is registered. Same units as §6.2.
+
+## 7. Errors and Consumables
+
+- `ErrorCode.identityCode` → message: `error_codes.py` (229 codes for this
+  model from the app's own table; the app's product key `EHf6cRNRGT` is the
+  **J4** platform internally).
+- Consumables: `GetConsumableInfo_Response.consumableInfo` lists items **due**:
+  `maintainItems` (`ConsumableMaintainItem`: DUST_BOX, DUST_FILTER,
+  WASH_RIBS, UNIVERSAL_WHEEL, CLIFF_SENSOR, …) and `replaceItems`
+  (`ConsumableReplaceItem`: DUST_FILTER, MOP, SIDE_BRUSH, ROLLER_BRUSH,
+  DETERGENT, DUST_BAG, …). Empty = nothing due.
+
+## 8. Local Network
+
+The robot listens on TCP 53 (DNS) and 6789 (ZeroMQ ZMTP 3.1, NULL security,
+**PULL** socket — accepts pushes from anyone on the LAN), plus a dozen
+high ports that answer no common protocol. Pushing commands to 6789 in any
+framing (raw, multipart topic + payload, Narwal frame) has no observable
+effect, and the official app sends no local traffic at all. Treat the
+Freo X Ultra as **cloud-only**.
 
 ## 9. Home Assistant Integration Notes
 
-### Threading Model
+### Threading
 
-- paho-mqtt runs its own network thread (`loop_start()`)
-- HA's event loop is asyncio-based; all blocking I/O must use
-  `run_in_executor()`
-- SSL context creation (`ssl.create_default_context()`) is a blocking call
-  that HA detects — must run in executor during `connect()`
-- Command send/receive uses `threading.Event` (not asyncio.Future) to
-  avoid cross-thread asyncio issues
-- Per-command `threading.Lock` prevents concurrent calls to the same
-  command from colliding in the pending-response map
+paho-mqtt runs its own network thread; blocking calls (SSL context, waiting
+on a reply) run in executors; replies are matched with `threading.Event`, and
+a per-command lock serialises calls to the same topic (they share one
+response topic). Pushes are handed to the event loop with
+`call_soon_threadsafe`.
 
-### Entity Architecture
+### Coordinator
 
-- **VacuumEntity**: Main entity with start/stop/pause/locate/return_home.
-  Uses `clean/start_clean` with room-specific payload matching the Narwal
-  app's protocol. Room list exposed via `extra_state_attributes["rooms"]`.
-- **CameraEntity**: Map rendering. Fetches map every 120s (cached),
-  renders via `map_renderer.render_map()` in executor.
-- **SelectEntity**: Clean mode selector (Vacuum & Mop, Vacuum Only, etc.).
-  Stores selection on `coordinator.selected_clean_mode`.
-- **ButtonEntity**: Locate button (calls `common/yell`).
-- **SensorEntity**: Battery level, cleaned area, cleaning time.
+1. Refresh the token (fallback: full login), connect, subscribe to push
+   topics and pre-subscribe the response topics
+2. `active_robot_publish`, then status, feature list, firmware, config,
+   consumables, map
+3. Pushes drive state; polling (30 s active / 5 min idle) is a backup and
+   drives reconnects
+4. Config and consumables every 15 min; map every 30 min and after each task
+5. The camera only renders; the coordinator owns map fetching
 
-### Coordinator Flow
+### Rooms in HA
 
-1. Cloud login (email/password) → get JWT tokens
-2. Token refresh on every setup (tokens expire quickly)
-3. MQTT connect with refreshed access_token as password
-4. Subscribe to `{base_topic}/#`
-5. Send `active_robot_publish` to trigger push broadcasts
-6. Request initial status via `get_device_base_status`
-7. Fetch rooms via `get_map`
-8. Poll status every 60s as backup for push updates
+The vacuum supports `CLEAN_AREA` (HA 2026.3+): rooms are segments, and a
+repair issue is raised when the robot's rooms change after the user mapped
+them. `vacuum.send_command` → `clean_rooms` remains for the card and
+automations.
 
-### Config Flow
+## 10. Pitfalls
 
-Step 1: Email + password + region → cloud login
-Step 2: Enter product_key and device_name (MQTT hex identifier)
-
-The cloud API returns a numeric `device_id` but MQTT needs the 32-char
-hex `device_name`. These are different values. The config flow warns the
-user about this.
-
-### Battery Deprecation
-
-HA 2026.8 will remove `battery_level` from `VacuumEntity`. The integration
-should migrate to a separate `SensorEntity` with `device_class=BATTERY`
-linked to the same device.
-
-### Frontend Card Registration
-
-Uses `hass.http.async_register_static_paths` with `StaticPathConfig` (HA
-2024.7+ API). The card JS is served from
-`/narwal/narwal-vacuum-card.js` and auto-registers with Lovelace.
-
----
-
-## 10. Known Issues & Pitfalls
-
-1. **Device name vs device ID**: The #1 cause of "everything times out".
-   MQTT device_name is a 32-char hex string, NOT the numeric cloud ID.
-
-2. **`clean/start_clean` requires a special payload**: The clean configuration
-   must be appended OUTSIDE (after) the Narwal auth frame, not inside it.
-   Without this payload, the vacuum returns NOT_APPLICABLE (code=2).
-
-3. **Repeated protobuf fields**: Room data (field 12) is repeated. A naive
-   parser that overwrites on duplicate field numbers will only keep the
-   last room. Use `parse_protobuf_repeated()`.
-
-4. **Map grid is packed varints, not raw bytes**: The zlib-decompressed
-   data is a protobuf wrapper containing packed varint pixels. Each pixel
-   is 1-3 bytes. Treating each byte as a pixel produces garbage.
-
-5. **Map Y-axis is inverted**: Grid Y=0 is the bottom. Must flip vertically.
-
-6. **Concurrent command collision**: Two calls to the same command (e.g.,
-   `get_map` from camera + coordinator) overwrite each other's pending
-   response entry. Per-command locking is required.
-
-7. **SSL blocking in HA**: `ssl.create_default_context()` calls
-   `load_default_certs` which is blocking. Must run MQTT connect in executor.
-
-8. **Token expiry**: JWT tokens expire quickly. Always refresh before
-   MQTT connect. The coordinator re-authenticates on each poll if expired.
-
-9. **SUBACK timing**: Must wait for SUBACK before publishing the command,
-   otherwise the response may arrive before the subscription is active.
-
-10. **Field 2 vs Field 4 width**: Map field 2 is the full grid width (228)
-    including padding. Field 4 is the actual map width (224). Use field 4
-    for rendering.
-
----
-
-## 11. Furniture/Obstacle Annotations (Field 32)
-
-Map field 32 contains `MapFurnitureInfoList` — furniture and obstacle
-annotations placed by the user in the app. Each entry:
-
-| Sub-Field | Type    | Description                           |
-|-----------|---------|---------------------------------------|
-| 1         | int32   | Object ID                             |
-| 2         | uint32  | Furniture type enum (see APK)         |
-| 3.1.1     | float32 | Center X (world coordinates)          |
-| 3.1.2     | float32 | Center Y (world coordinates)          |
-| 3.2       | float32 | Width (grid units)                    |
-| 3.3       | float32 | Height (grid units)                   |
-| 4         | float32 | Angle (degrees)                       |
-
-Furniture type enum (from APK `map_furniture.json`):
-1=Single Bed, 2=Double Bed, 3=Baby Bed, 4=Dining Table, 5=Round Table,
-6=Tea Table, 7=Round Tea Table, 8=TV Stand, 9=Bedside Table, 10=Locker,
-11=Wardrobe, 12=Shoe Cabinet, 13=Armchair, 14=Sofa, 15=L-Shaped Sofa,
-16=Lazy Chair, 17=Chair, 18=Bar Chair, 19=Cat Toilet, 20=Pet Feeder,
-21=Pet House, 22=Washing Machine, 23=Refrigerator, 24=Air Conditioner,
-25=Fan, 26=Potted Plant, 27=Floor Mirror, 28=Toilet, 29=Piano,
-30=U-Shaped Sofa, 31=Desk, 32=Grand Piano, 33=Washbasin, 34=Stove,
-75=Cat House, 76=Dog House, 77=Round Placeholder, 78=Weighing Scale.
-
-Coordinate transform: `pixel = raw_coord - origin` where origin comes
-from map field 6 (`field 6.3` = origin_x, `field 6.1` = origin_y).
-
----
-
-## 12. Real-Time Position (`map/display_map`)
-
-Broadcast every ~1.5s during active cleaning:
-
-| Field | Description                                         |
-|-------|-----------------------------------------------------|
-| 1.1   | Robot position: `{1: x_dm, 2: y_dm}` (float32, decimeters) |
-| 1.2   | Robot heading (float32, radians)                    |
-| 5     | Dock/reference position (same format as 1)          |
-| 7     | Cleaned-area grid overlay: `{1: width, 2: height, 3: compressed}` |
-| 10    | Timestamp (ms since epoch)                          |
-| 12    | Active room list                                    |
-
-Position conversion to grid pixels:
-```
-pixel_x = robot_x_dm - origin_x
-pixel_y = robot_y_dm - origin_y
-```
-
-Heading conversion: `degrees = math.degrees(heading_radians)`
-
----
-
-## 13. File Structure
-
-```
-custom_components/narwal/
-├── __init__.py          # Entry point, card registration
-├── camera.py            # Map camera entity
-├── config_flow.py       # Cloud login + device selection
-├── const.py             # HA integration constants
-├── coordinator.py       # DataUpdateCoordinator (MQTT + polling)
-├── entity.py            # Base entity class
-├── manifest.json        # Integration manifest
-├── select.py            # Clean mode selector entity
-├── sensor.py            # Battery/area/time sensors
-├── strings.json         # UI strings
-├── translations/en.json # English translations
-├── vacuum.py            # Main vacuum entity
-├── button.py            # Locate button entity
-├── frontend/
-│   └── narwal-vacuum-card.js  # Custom Lovelace card
-└── narwal_client/
-    ├── __init__.py      # Public API exports
-    ├── client.py        # MQTT client (paho-mqtt)
-    ├── cloud.py         # REST API client
-    ├── const.py         # Protocol constants & enums
-    ├── map_renderer.py  # Map grid → PNG rendering
-    └── models.py        # State models, protobuf parsers
-```
+1. **Device name ≠ device ID.** MQTT needs the 32-char hex device name, not the
+   numeric cloud ID.
+2. **Two `CleanParam` messages.** Use CleanTask.pb's (§5.6).
+3. **Get vs set field numbers differ** for settings (§5.5).
+4. **Fan level / mop wetness are rejected while docked**; remember the choice
+   and send it in the next clean task.
+5. **No-go rooms** make the whole task fail.
+6. **Pause is a flag** (`pauseStatus`), not a task type.
+7. **Repeated fields** (rooms, items, forbiddens) must not be collapsed to the
+   last value.
+8. **Map poses are grid cells**; rotation is clockwise.
+9. **Explicit subscriptions only** — wildcard subscriptions are accepted by the
+   broker but deliver nothing.
+10. **Blocking SSL in HA** — create the MQTT client in an executor.

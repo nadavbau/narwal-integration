@@ -35,6 +35,4 @@ All MQTT and SSL operations must run in executors. HA detects blocking calls
 
 ## Broadcast Registration
 
-The vacuum only sends push broadcasts after receiving `active_robot_publish`.
-Re-send this every poll cycle — the vacuum may have woken from deep sleep
-since the last send and doesn't know about us.
+The vacuum only sends pushes while an app client is registered via `active_robot_publish` (publish window 60 s). The coordinator re-sends it on its own 50 s timer, independent of the poll interval, and the client re-sends it before retrying a timed-out command (the vacuum may have woken from deep sleep and not know about us).
