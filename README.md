@@ -131,7 +131,7 @@ The integration authenticates using the same API as the official Narwal mobile a
 ### Requirements
 
 - Python 3.12+
-- Home Assistant 2024.1.0+
+- Home Assistant 2025.3.0+ (room cleaning by area needs 2026.3+)
 - `paho-mqtt` >= 2.0.0
 
 ### Tests
