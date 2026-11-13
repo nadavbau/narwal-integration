@@ -230,9 +230,10 @@ def render_map(
                 cy = (height - 1 - room_sum_y[rid] / room_count[rid] + 0.5) * scale
                 labels.append((name, cx, cy))
 
-    # Match the app's orientation. PIL rotates counter-clockwise for positive
-    # angles; rotate the annotation points the same way.
-    rotate = rotate % 360
+    # Match the app's orientation. The robot's rotateAngle is clockwise
+    # (verified against the app); PIL rotates counter-clockwise for positive
+    # angles, so negate it. Annotation points are rotated the same way.
+    rotate = (-rotate) % 360
     w_img, h_img = img.size
     if rotate in (90, 180, 270):
         img = img.rotate(rotate, expand=True)
