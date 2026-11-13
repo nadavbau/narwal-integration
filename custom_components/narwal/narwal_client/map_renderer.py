@@ -79,12 +79,60 @@ def _darken(color: tuple[int, int, int], amount: int = 80) -> tuple[int, int, in
     )
 
 
+COLOR_ROBOT = (255, 255, 255)
+COLOR_ROBOT_OUTLINE = (20, 120, 255)
+COLOR_STATION = (255, 196, 0)
+
+
+def render_snapshot(
+    snapshot,
+    room_names: dict[int, str] | None = None,
+    robot_pose=None,
+    active_room_id: int | None = None,
+    scale: int = 3,
+) -> bytes:
+    """Render a MapSnapshot with dock and robot markers, rotated like the app."""
+    markers = []
+    if snapshot.station:
+        markers.append(("station", snapshot.to_pixel(snapshot.station), snapshot.station.theta))
+    pose = robot_pose or snapshot.robot
+    if pose:
+        markers.append(("robot", snapshot.to_pixel(pose), pose.theta))
+    return render_map(
+        snapshot.grid, snapshot.width, snapshot.height, room_names,
+        scale=scale, markers=markers, rotate=snapshot.rotate_angle,
+        highlight_room=active_room_id,
+    )
+
+
+def _draw_markers_at(img, markers, scale: int) -> None:
+    """Draw (kind, x, y, heading) markers given in final image coordinates."""
+    import math
+
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(img)
+    for kind, x, y, theta in markers:
+        if kind == "station":
+            r = 3.5 * scale
+            draw.rectangle([x - r, y - r, x + r, y + r], fill=COLOR_STATION, outline=(0, 0, 0))
+        else:
+            r = 4 * scale
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=COLOR_ROBOT, outline=COLOR_ROBOT_OUTLINE, width=max(1, scale))
+            hx = x + math.cos(theta) * r
+            hy = y - math.sin(theta) * r
+            draw.line([x, y, hx, hy], fill=COLOR_ROBOT_OUTLINE, width=max(1, scale))
+
+
 def render_map(
     compressed_grid: bytes,
     width: int,
     height: int,
     room_names: dict[int, str] | None = None,
     scale: int = 2,
+    markers: list | None = None,
+    rotate: int = 0,
+    highlight_room: int | None = None,
 ) -> bytes:
     """Render compressed map grid data as a PNG image.
 
@@ -161,31 +209,73 @@ def render_map(
                 room_sum_y[room_id] = room_sum_y.get(room_id, 0) + y
                 room_count[room_id] = room_count.get(room_id, 0) + 1
 
+    if highlight_room is not None:
+        for i, val in enumerate(pixels):
+            if val > 0x28 and (val >> 8) == highlight_room and not (val & 0x10):
+                x, y = i % width, i // width
+                r, g, b = px[x, y]
+                px[x, y] = (min(255, r + 50), min(255, g + 50), min(255, b + 50))
+
     img = img.transpose(Image.FLIP_TOP_BOTTOM)
-
-    if room_names and room_count:
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", 10)
-        except (IOError, OSError):
-            font = ImageFont.load_default()
-
-        for rid, name in room_names.items():
-            if not name or rid not in room_count:
-                continue
-            cx = room_sum_x[rid] // room_count[rid]
-            cy = height - 1 - (room_sum_y[rid] // room_count[rid])
-            bbox = font.getbbox(name)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-            tx = cx - tw // 2
-            ty = cy - th // 2
-            for ox, oy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                draw.text((tx + ox, ty + oy), name, fill=(0, 0, 0), font=font)
-            draw.text((tx, ty), name, fill=(255, 255, 255), font=font)
-
+    scale = max(1, scale)
     if scale > 1:
         img = img.resize((width * scale, height * scale), Image.NEAREST)
+
+    # Points to annotate, in scaled image coordinates (after the flip).
+    labels: list[tuple[str, float, float]] = []
+    if room_names and room_count:
+        for rid, name in room_names.items():
+            if name and rid in room_count:
+                cx = (room_sum_x[rid] / room_count[rid] + 0.5) * scale
+                cy = (height - 1 - room_sum_y[rid] / room_count[rid] + 0.5) * scale
+                labels.append((name, cx, cy))
+
+    # Match the app's orientation. PIL rotates counter-clockwise for positive
+    # angles; rotate the annotation points the same way.
+    rotate = rotate % 360
+    w_img, h_img = img.size
+    if rotate in (90, 180, 270):
+        img = img.rotate(rotate, expand=True)
+
+    # Margin so a dock/robot sitting on the map edge isn't clipped.
+    margin = 8 * scale
+    padded = Image.new("RGB", (img.size[0] + 2 * margin, img.size[1] + 2 * margin), COLOR_UNKNOWN)
+    padded.paste(img, (margin, margin))
+    img = padded
+
+    def _rot(x: float, y: float) -> tuple[float, float]:
+        if rotate == 90:
+            x, y = y, w_img - x
+        elif rotate == 180:
+            x, y = w_img - x, h_img - y
+        elif rotate == 270:
+            x, y = h_img - y, x
+        return x + margin, y + margin
+
+    if markers:
+        import math
+
+        rotated = []
+        for kind, (gx, gy), theta in markers:
+            x = (gx + 0.5) * scale
+            y = (height - 1 - gy + 0.5) * scale
+            rx, ry = _rot(x, y)
+            rotated.append((kind, rx, ry, theta + math.radians(rotate)))
+        _draw_markers_at(img, rotated, scale)
+
+    if labels:
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.load_default(size=5 * scale)  # Pillow >= 10.1
+        except TypeError:
+            font = ImageFont.load_default()
+        for name, x, y in labels:
+            tx, ty = _rot(x, y)
+            bbox = draw.textbbox((0, 0), name, font=font)
+            tx -= (bbox[2] - bbox[0]) / 2
+            ty -= (bbox[3] - bbox[1]) / 2
+            draw.text((tx, ty), name, fill=(255, 255, 255), font=font,
+                      stroke_width=max(1, scale // 2), stroke_fill=(0, 0, 0))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")

@@ -41,21 +41,176 @@
       "status": {
         "name": "Status"
       },
+      "error": {
+        "name": "Error"
+      },
       "elapsed_time": {
-        "name": "Cleaning Time (Session)"
+        "name": "Cleaning time"
+      },
+      "remaining_time": {
+        "name": "Time remaining"
       },
       "cleaned_area": {
-        "name": "Cleaned Area (Session)"
+        "name": "Cleaned area"
+      },
+      "progress": {
+        "name": "Cleaning progress"
+      },
+      "current_room": {
+        "name": "Current room"
+      },
+      "consumables_due": {
+        "name": "Maintenance items due"
+      },
+      "clean_water_tank": {
+        "name": "Clean water tank",
+        "state": {
+          "normal": "Normal",
+          "empty": "Empty",
+          "not_installed": "Not installed",
+          "abnormal": "Abnormal"
+        }
+      },
+      "dirty_water_tank": {
+        "name": "Dirty water tank",
+        "state": {
+          "normal": "Normal",
+          "filled_or_not_installed": "Full or not installed",
+          "abnormal": "Abnormal"
+        }
+      },
+      "dust_bin": {
+        "name": "Dust bin",
+        "state": {
+          "normal": "Normal",
+          "not_installed": "Not installed",
+          "abnormal": "Abnormal",
+          "suggest_clean_up": "Needs emptying"
+        }
+      },
+      "detergent": {
+        "name": "Detergent",
+        "state": {
+          "installed_and_not_empty": "OK",
+          "uninstalled": "Not installed",
+          "installed_and_empty": "Empty",
+          "running_out": "Running low",
+          "not_using": "Not in use"
+        }
+      }
+    },
+    "binary_sensor": {
+      "charging": {
+        "name": "Charging"
+      },
+      "docked": {
+        "name": "Docked"
+      },
+      "problem": {
+        "name": "Problem"
+      },
+      "maintenance_due": {
+        "name": "Maintenance due"
       }
     },
     "button": {
       "locate": {
         "name": "Locate"
+      },
+      "wake": {
+        "name": "Wake up"
+      },
+      "wash_mop": {
+        "name": "Wash mops"
+      },
+      "dry_mop": {
+        "name": "Dry mops"
+      },
+      "wash_and_dry_mop": {
+        "name": "Wash and dry mops"
+      },
+      "empty_dustbin": {
+        "name": "Empty dust bin"
       }
     },
     "camera": {
       "map": {
         "name": "Map"
+      }
+    },
+    "select": {
+      "clean_mode": {
+        "name": "Clean mode"
+      },
+      "mop_humidity": {
+        "name": "Mop wetness",
+        "state": {
+          "dry": "Dry",
+          "normal": "Normal",
+          "wet": "Wet"
+        }
+      },
+      "mop_dry_strength": {
+        "name": "Mop drying",
+        "state": {
+          "quiet": "Quiet",
+          "strong": "Strong",
+          "smart": "Smart"
+        }
+      },
+      "mop_wash_frequency": {
+        "name": "Mop washing frequency",
+        "state": {
+          "efficient": "Efficient",
+          "normal": "Normal",
+          "deep": "Deep"
+        }
+      },
+      "carpet_strategy": {
+        "name": "Carpet handling",
+        "state": {
+          "cross": "Cross",
+          "boost": "Boost suction",
+          "ignore": "Ignore",
+          "avoid": "Avoid"
+        }
+      }
+    },
+    "switch": {
+      "child_lock": {
+        "name": "Child lock"
+      },
+      "auto_empty": {
+        "name": "Auto-empty"
+      },
+      "quiet_auto_empty": {
+        "name": "Quiet auto-empty"
+      },
+      "auto_detergent": {
+        "name": "Auto detergent"
+      },
+      "carpet_boost": {
+        "name": "Carpet boost"
+      },
+      "pet_mode": {
+        "name": "Pet mode"
+      },
+      "smart_deep_clean": {
+        "name": "Smart deep clean"
+      },
+      "hot_water_wash": {
+        "name": "Hot water mop wash"
+      },
+      "do_not_disturb": {
+        "name": "Do not disturb"
+      }
+    },
+    "number": {
+      "volume": {
+        "name": "Volume"
+      },
+      "clean_passes": {
+        "name": "Clean passes"
       }
     }
   }
