@@ -66,15 +66,35 @@ def load_env_file(path: str | None = None) -> None:
 def get_config() -> dict:
     load_env_file()
     region = os.environ.get("NARWAL_REGION", "il")
-    return {
+    cfg = {
         "email": _require_env("NARWAL_EMAIL"),
         "password": _require_env("NARWAL_PASSWORD"),
         "region": region,
-        "device_id": _require_env("NARWAL_DEVICE_ID"),
-        "product_key": _require_env("NARWAL_PRODUCT_KEY"),
+        "device_id": os.environ.get("NARWAL_DEVICE_ID", ""),
+        "product_key": os.environ.get("NARWAL_PRODUCT_KEY", ""),
         "api_host": API_REGIONS.get(region, API_REGIONS["us"]),
         "mqtt_host": MQTT_REGIONS.get(region, MQTT_REGIONS["us"]),
     }
+    if not cfg["device_id"] or not cfg["product_key"]:
+        _discover_device(cfg)
+    return cfg
+
+
+def _discover_device(cfg: dict) -> None:
+    """Fill device_id / product_key from the account's robot list."""
+    cloud_mod = load_narwal_client().cloud
+    cloud = cloud_mod.NarwalCloud(region=cfg["region"])
+    cloud.login(cfg["email"], cfg["password"])
+    devices = cloud.get_devices()
+    if cfg["device_id"]:
+        devices = [d for d in devices if d.device_name == cfg["device_id"]] or devices
+    if not devices:
+        print("ERROR: no robots linked to this Narwal account.", file=sys.stderr)
+        sys.exit(1)
+    device = devices[0]
+    cfg["device_id"] = cfg["device_id"] or device.device_name
+    cfg["product_key"] = cfg["product_key"] or device.product_key
+    print(f"Using robot: {device.label}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +298,7 @@ def load_narwal_client():
         pkg = types.ModuleType("narwal_client")
         pkg.__path__ = [os.path.abspath(root)]
         sys.modules["narwal_client"] = pkg
-    for name in ("const", "proto", "models", "client", "map_renderer", "error_codes"):
+    for name in ("const", "proto", "models", "client", "cloud", "map_renderer", "error_codes"):
         importlib.import_module(f"narwal_client.{name}")
     return sys.modules["narwal_client"]
 

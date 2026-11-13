@@ -43,17 +43,12 @@ Other Narwal models using the same cloud platform should also work.
 
 1. Go to **Settings > Devices & Services > Add Integration**
 2. Search for **Narwal**
-3. Enter your Narwal app credentials:
-   - **Email** -- your Narwal app account email
-   - **Password** -- your Narwal app account password
-   - **Region** -- the region your account is registered in (US, Israel, Europe, or China)
-4. Enter your device details:
-   - **Product Key** -- the product key for your vacuum model (default `EHf6cRNRGT` for Freo X Ultra)
-   - **Device Name** -- your device's unique identifier (a 32-character hex string)
+3. Sign in with your Narwal app account:
+   - **Email** and **Password** — the ones you use in the Narwal app
+   - **Region** — where the account is registered (US, Israel, Europe or China)
+4. That's it. Your robots are fetched from the Narwal cloud: with one robot it is added straight away; with several you pick one (add the integration again for each robot).
 
-### Finding your Device Name
-
-The Device Name is the 32-character hex string that identifies your specific vacuum on the Narwal cloud. You can find it in the Narwal app's network traffic, or by checking the MQTT topics the vacuum subscribes to. It looks like: `abcdef1234567890abcdef1234567890`.
+If the robot list can't be loaded, the flow falls back to asking for the product key (`EHf6cRNRGT` for the Freo X Ultra) and the robot's 32-character MQTT device name; `scripts/README.md` explains how to find it.
 
 ## Lovelace card
 

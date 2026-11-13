@@ -30,7 +30,7 @@ MQTT_REGIONS: dict[str, str] = {
 LOGIN_PATH = "/user-authentication-server/v2/login/loginByEmail"
 REFRESH_PATH = "/user-authentication-server/v1/token/refresh"
 USER_INFO_PATH = "/user-server/v2/user/getUserInfo"
-DEVICE_MESSAGES_PATH = "/app-message-server/v1/device-message/listPage"
+DEVICE_LIST_PATH = "/user-device-platform-server/device-info/getDeviceInfoList"
 
 
 class NarwalCloudError(Exception):
@@ -43,11 +43,24 @@ class NarwalAuthError(NarwalCloudError):
 
 @dataclass
 class NarwalDevice:
-    """A Narwal device discovered from the cloud."""
+    """A robot bound to the account (from getDeviceInfoList).
 
-    device_id: str
-    name: str
-    product_pic: str = ""
+    ``device_name`` is the 32-char hex id used in MQTT topics and
+    ``product_key`` the topic prefix — exactly what the MQTT client needs.
+    """
+
+    device_name: str
+    product_key: str
+    name: str = ""
+    model: str = ""
+    firmware: str = ""
+
+    @property
+    def label(self) -> str:
+        parts = [self.name or "Narwal robot"]
+        if self.model and self.model != self.name:
+            parts.append(f"({self.model})")
+        return " ".join(parts)
 
 
 @dataclass
@@ -122,7 +135,9 @@ class NarwalCloud:
         if resp.get("code") != 0:
             msg = resp.get("msg", "Login failed")
             err_code = resp.get("err_code", 0)
-            if err_code in (100202400, 100202600):
+            if err_code in (100202400, 100202600) or (
+                resp.get("code") == -1 and any(w in str(msg).lower() for w in ("password", "account"))
+            ):
                 raise NarwalAuthError(msg)
             raise NarwalCloudError(f"Login error ({err_code}): {msg}")
 
@@ -182,34 +197,32 @@ class NarwalCloud:
         return resp.get("result", {})
 
     def get_devices(self) -> list[NarwalDevice]:
-        """Discover devices by scanning recent device messages.
+        """List the robots bound to this account.
 
-        The message API returns messages per device with device_id and device_name,
-        which lets us find all bound devices without a dedicated device-list endpoint.
+        Same endpoint the Narwal app uses after login. Each entry's
+        ``deviceId`` is the MQTT device name and ``productId`` the product key.
         """
-        resp = self._request(
-            "GET",
-            f"{DEVICE_MESSAGES_PATH}?pageNum=1&pageSize=50",
-        )
+        resp = self._request("GET", DEVICE_LIST_PATH)
         if resp.get("code") != 0:
-            _LOGGER.warning("Device message query failed: %s", resp.get("msg"))
-            return []
-
-        messages = resp.get("result", {}).get("message_list", [])
-        seen: dict[str, NarwalDevice] = {}
-        for msg in messages:
-            did = msg.get("device_id") or msg.get("robot_id")
-            if not did:
+            raise NarwalCloudError(f"Device list failed: {resp.get('msg')}")
+        result = resp.get("result") or {}
+        models = {
+            p.get("productId"): p.get("productModel", "")
+            for p in result.get("productInfoList") or []
+        }
+        devices: list[NarwalDevice] = []
+        for d in result.get("deviceInfoList") or []:
+            device_name, product_key = d.get("deviceId"), d.get("productId")
+            if not device_name or not product_key:
                 continue
-            did = str(did)
-            if did not in seen:
-                seen[did] = NarwalDevice(
-                    device_id=did,
-                    name=msg.get("robot_name", msg.get("device_name", did)),
-                    product_pic=msg.get("product_pic", ""),
-                )
-
-        return list(seen.values())
+            devices.append(NarwalDevice(
+                device_name=str(device_name),
+                product_key=str(product_key),
+                name=str(d.get("robotName") or ""),
+                model=str(models.get(product_key) or ""),
+                firmware=str(d.get("firmwareVersion") or ""),
+            ))
+        return devices
 
     def ensure_valid_token(self) -> str:
         """Return a valid access token, refreshing if needed."""

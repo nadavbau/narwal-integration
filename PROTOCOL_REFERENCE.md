@@ -61,22 +61,25 @@ The access token is a standard JWT. The payload contains:
 
 ### Device Discovery
 
-There is **no dedicated device-list endpoint**. Devices are discovered via:
+`GET /user-device-platform-server/device-info/getDeviceInfoList` (the call the
+app makes after login) lists the robots bound to the account:
 
-`GET /app-message-server/v1/device-message/listPage?pageNum=1&pageSize=50`
+```json
+{"code": 0, "result": {
+  "deviceInfoList": [{"deviceId": "<32-char hex MQTT device name>",
+                      "productId": "<product key>", "robotName": "...",
+                      "firmwareVersion": "v01.09.01.00", "snNumber": "..."}],
+  "productInfoList": [{"productId": "<product key>",
+                       "productModel": "Narwal Freo X Ultra", "productGroup": "J4"}]}}
+```
 
-Each message contains `device_id` (numeric cloud ID) and `robot_name`.
+`deviceId` **is** the MQTT device name and `productId` the topic prefix —
+everything the MQTT client needs. Verified on the il, us and eu API hosts.
+The config flow uses it, so users only enter email, password and region.
 
-**CRITICAL**: The `device_id` from the cloud API (e.g., `132250`) is the
-numeric cloud identifier. The MQTT device name is a **different** 32-character
-hex string (e.g., `abcdef1234567890abcdef1234567890`). Using the wrong one
-causes all commands to time out silently because the broker's ACL rejects
-the topics.
-
-The MQTT device name can be found by:
-1. Monitoring MQTT traffic from the official Narwal app
-2. Using MQTT wildcard subscription `/{product_key}/+/#` to discover active devices
-3. The `discover_devices_via_mqtt()` method in `client.py`
+Older notes used `GET /app-message-server/v1/device-message/listPage`; its
+`device_id` is a numeric cloud ID (e.g. `123456`), **not** the MQTT device
+name — with it every command times out silently (broker ACL).
 
 ### Known Product Key
 

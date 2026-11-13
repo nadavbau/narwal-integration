@@ -2,30 +2,39 @@
   "config": {
     "step": {
       "user": {
-        "title": "Narwal Account Login",
-        "description": "Enter your Narwal app account credentials.",
+        "title": "Narwal account",
+        "description": "Sign in with the email and password you use in the Narwal app. Your robots are found automatically.",
         "data": {
           "email": "Email",
           "password": "Password",
           "region": "Region"
         }
       },
-      "device": {
-        "title": "Device Selection",
-        "description": "Enter your vacuum's Product Key and Device Name.\n\n{discovered_devices}",
+      "pick": {
+        "title": "Choose a robot",
+        "description": "Several robots are linked to this account. Pick the one to add (add the integration again for the others).",
         "data": {
-          "product_key": "Product Key",
-          "device_name": "Device Name (device ID)"
+          "device_name": "Robot"
+        }
+      },
+      "manual": {
+        "title": "Robot details",
+        "description": "The robot list could not be loaded from the Narwal cloud. Enter the product key and the robot's 32-character MQTT device name (see scripts/README.md in the repository for how to find it).",
+        "data": {
+          "product_key": "Product key",
+          "device_name": "Device name (32 hex characters)"
         }
       }
     },
     "error": {
-      "invalid_auth": "Invalid email or password.",
-      "cannot_connect": "Unable to connect to Narwal cloud servers.",
+      "invalid_auth": "Wrong email or password.",
+      "cannot_connect": "Unable to connect to the Narwal cloud.",
+      "invalid_device_name": "The device name must be 32 hexadecimal characters.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This device is already configured."
+      "already_configured": "This robot is already set up.",
+      "no_devices": "No robots are linked to this Narwal account. Add your robot in the Narwal app first."
     }
   },
   "entity": {
