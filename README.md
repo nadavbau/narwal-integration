@@ -6,6 +6,15 @@ A custom Home Assistant integration for **Narwal** robot vacuums (Freo X Ultra a
 
 > **⚠️ Work in Progress** — This integration is under active development. Expect breaking changes, incomplete features, and rough edges. Contributions and bug reports are welcome!
 
+> [!WARNING]
+> **There are two Narwal integrations, and they can't be installed together.**
+> This one and [sjmotew/NarwalIntegration](https://github.com/sjmotew/NarwalIntegration) both install to `custom_components/narwal` (domain `narwal`), so Home Assistant and HACS can only hold one of them at a time. Pick the one that matches your robot:
+>
+> - **This integration** talks to the robot through the Narwal cloud (your Narwal app account). It's built and tested on the **Freo X Ultra**, which has no local API.
+> - **[sjmotew/NarwalIntegration](https://github.com/sjmotew/NarwalIntegration)** is fully local (WebSocket on port 9002, no account) and targets models that expose that interface, such as the Flow, Flow 2, Freo Z10 / Z10 Ultra, Freo X10 Pro and Freo 20. See its compatibility table.
+>
+> To switch, remove the installed one first (its integration entry, then the HACS download), restart Home Assistant, and then install the other. Renaming either domain isn't planned: it would break every existing user's config entries and entity IDs ([#9](https://github.com/nadavbau/narwal-integration/issues/9)).
+
 ## Features
 
 - **Vacuum entity**: start, stop, pause/resume, return to dock, locate, suction level, live state (cleaning, paused, returning, docked, error)
