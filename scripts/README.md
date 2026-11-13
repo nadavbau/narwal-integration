@@ -15,8 +15,9 @@ All scripts read credentials from environment variables. Copy `.env.example` and
 ```bash
 cp scripts/.env.example scripts/.env
 # Edit scripts/.env with your credentials
-source scripts/.env && export NARWAL_EMAIL NARWAL_PASSWORD NARWAL_REGION NARWAL_DEVICE_ID NARWAL_PRODUCT_KEY
 ```
+
+The scripts read `scripts/.env` automatically (values already in the environment take precedence).
 
 | Variable | Required | Description |
 |---|---|---|
@@ -106,35 +107,27 @@ python3 mqtt_mitm.py
 
 ### `sniff_app.py` — MQTT Traffic Sniffer
 
-Subscribes to all known MQTT topics and logs traffic in real-time. Use this to capture what the official Narwal app sends when performing actions. Requires `NARWAL_DEVICE_ID` and `NARWAL_PRODUCT_KEY`.
+Subscribes to the known command, response and push topics and logs traffic in real time. Use it to capture what the official Narwal app sends when you perform an action. Every payload is decoded with the integration's schema, so you see the app's field and enum names (`StartClean_Request: {'task': {'items': [...]}}`).
 
 ```bash
-# Listen for 5 minutes (default 300s)
-python3 sniff_app.py
-
-# Listen for 10 minutes
-python3 sniff_app.py --duration 600
+python3 sniff_app.py                 # listen 5 minutes
+python3 sniff_app.py --duration 600  # listen 10 minutes
 ```
 
-For each message it prints the topic, payload size, raw hex, and MQTT5 response topic. For `clean/start_clean` messages it also decodes the protobuf clean configuration showing room IDs, passes, and cleaning modes.
+The robot only pushes status while an app client is active, so a quiet capture with the robot asleep is normal.
 
-### `test_clean_rooms.py` — Room Cleaning Tester
+### `test_clean_rooms.py` — Live Room-Clean Test
 
-Tests room cleaning commands by starting a clean for each room, verifying the response, then force-stopping before the next room.
+Uses the integration's `narwal_client` library (the exact payloads Home Assistant sends). Without `--rooms` it only prints the robot's state and its rooms, marking no-go rooms. With `--rooms` it starts a real clean, waits until the robot reports cleaning, prints progress, then stops it and sends it back to the dock (also on Ctrl-C).
 
 ```bash
-# Test all rooms (auto-discovered from map)
-python3 test_clean_rooms.py
-
-# Test specific rooms
-python3 test_clean_rooms.py --rooms 1,2,7
-
-# Vacuum-only mode with 1 pass
-python3 test_clean_rooms.py --vacuum-only --passes 1
-
-# Test multi-room cleaning
-python3 test_clean_rooms.py --rooms 2 --multi 1,4,7
+python3 test_clean_rooms.py                                   # list rooms only
+python3 test_clean_rooms.py --rooms 4                         # vacuum + mop room 4, 30 s
+python3 test_clean_rooms.py --rooms 4,2 --mode vacuum --fan strong --passes 2
+python3 test_clean_rooms.py --rooms 4 --mode mop --wetness wet --run 60
 ```
+
+Modes: `vacuum-mop`, `vacuum-then-mop`, `vacuum`, `mop`. Fan: `quiet`, `normal`, `strong`, `max`. Wetness: `dry`, `normal`, `wet`.
 
 ### `discover_device.py` — MQTT Broker Discovery (Diagnostic)
 
@@ -148,14 +141,13 @@ python3 discover_device.py
 
 Shared module used by the MQTT scripts. Contains:
 - Cloud API login
-- Protobuf encoding/decoding helpers
-- MQTT client wrapper (`NarwalMQTT`)
-- Command result parsing
+- Minimal protobuf helpers and an MQTT wrapper (`NarwalMQTT`) for the discovery scripts
+- `load_narwal_client()` / `connect_client()` to use the integration's protocol library without Home Assistant
 
 ## Important Notes
 
 - **Never commit `.env` files** — they contain credentials
 - Scripts connect to the real Narwal MQTT broker and send real commands
-- `test_clean_rooms.py` will briefly start the vacuum for each room being tested
+- `test_clean_rooms.py --rooms ...` makes the robot drive; it is stopped and sent home afterwards
 - The vacuum must be in standby/docked state for clean commands to succeed
 - `mqtt_mitm.py` does **not** need environment variables — it only needs the `cryptography` package

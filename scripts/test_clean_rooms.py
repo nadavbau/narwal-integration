@@ -1,181 +1,108 @@
 #!/usr/bin/env python3
-"""Test cleaning individual and multiple rooms via MQTT.
+"""Start a real room clean, confirm the robot is cleaning, then stop and dock.
 
-Usage:
-  export NARWAL_EMAIL=... NARWAL_PASSWORD=... NARWAL_DEVICE_ID=... NARWAL_REGION=il
-  python tests/test_clean_rooms.py [--rooms 1,2,7] [--vacuum-only] [--passes 2]
+Uses the integration's own narwal_client library, so it exercises exactly
+the payloads Home Assistant sends.
 
-By default, tests all rooms discovered from the map. Each room is started,
-verified, then force-stopped before moving to the next.
+Usage (credentials from scripts/.env or the environment):
+  python3 test_clean_rooms.py                         # list rooms, then exit
+  python3 test_clean_rooms.py --rooms 4               # vacuum + mop room 4
+  python3 test_clean_rooms.py --rooms 4,2 --mode vacuum --fan strong --passes 2
+  python3 test_clean_rooms.py --rooms 4 --mode mop --wetness wet --run 60
+
+The robot drives. It is stopped after --run seconds (default 30) and sent
+back to the dock; Ctrl-C also stops it and sends it home.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import time
 
-from _common import (
-    RESULT_NAMES,
-    NarwalMQTT,
-    auth_payload,
-    cloud_login,
-    get_config,
-    parse_command_result,
-    parse_protobuf_fields,
-    pb_string,
-    pb_varint,
-)
+from _common import connect_client, load_narwal_client
+
+lib = load_narwal_client()
+CleanMode = lib.const.CleanMode
+FanLevel = lib.const.FanLevel
+MopHumidity = lib.const.MopHumidity
+NarwalCommandError = lib.client.NarwalCommandError
+
+MODES = {
+    "vacuum-mop": CleanMode.VACUUM_AND_MOP,
+    "vacuum-then-mop": CleanMode.VACUUM_THEN_MOP,
+    "vacuum": CleanMode.VACUUM_ONLY,
+    "mop": CleanMode.MOP_ONLY,
+}
+FANS = {"quiet": FanLevel.QUIET, "normal": FanLevel.NORMAL, "strong": FanLevel.STRONG, "max": FanLevel.MAX}
+WETNESS = {"dry": MopHumidity.DRY, "normal": MopHumidity.NORMAL, "wet": MopHumidity.WET}
 
 
-def build_clean_payload(
-    user_uuid: str,
-    room_ids: list[int],
-    vacuum_on: bool = True,
-    mop_on: bool = False,
-    fan_level: int = 1,
-    mop_humidity: int = 1,
-    passes: int = 2,
-) -> bytes:
-    """Build a clean/start_clean payload with correct field mapping."""
-    room_config = (
-        pb_varint(1, passes) + pb_varint(2, passes)
-        + pb_varint(3, 1 if vacuum_on else 0)
-        + pb_varint(4, 1 if mop_on else 2)
-        + pb_varint(5, fan_level) + pb_varint(6, mop_humidity)
-        + pb_varint(7, 1) + pb_varint(8, 1) + pb_varint(9, 1) + pb_varint(10, 0)
-    )
-
-    room_list = b""
-    for rid in room_ids:
-        global_cfg = pb_varint(1, 1) + pb_varint(2, rid)
-        room_list += pb_string(1, global_cfg)
-        room_list += pb_string(2, room_config)
-    room_list += pb_varint(3, 1)
-
-    clean_config = (
-        pb_varint(1, 1)
-        + pb_string(2, room_list)
-        + pb_varint(3, 1)
-        + pb_string(4, pb_varint(1, 1) + pb_varint(5, 0))
-        + pb_varint(5, 1)
-    )
-
-    frame = auth_payload(user_uuid)
-    return frame + pb_string(1, clean_config)
+async def wait_for(client, predicate, timeout: float) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate(client.state):
+            return True
+        await asyncio.sleep(1)
+    return False
 
 
-def discover_rooms(mq: NarwalMQTT, user_uuid: str) -> list[tuple[int, str]]:
-    """Fetch the map and extract room IDs and names."""
-    from _common import parse_protobuf_fields
-
-    ROOM_NAMES = {
-        0: "Room", 1: "Master Bedroom", 2: "Bedroom", 3: "Living Room",
-        4: "Kitchen", 5: "Bathroom", 6: "Toilet", 7: "Dining Room",
-        8: "Dining Room", 9: "Balcony", 10: "Utility Room", 11: "Study",
-        12: "Nursery", 13: "Recreation Room", 14: "Storage Room", 15: "Other",
-    }
-
-    payload = auth_payload(user_uuid) + pb_varint(1, 0) + pb_varint(2, 0)
-    resp = mq.send_command("map/get_map", payload)
-    if not resp:
-        return []
-
-    if resp[0] == 0x01:
-        idx = 1
-        while idx < len(resp) and resp[idx] & 0x80:
-            idx += 1
-        idx += 1
-        inner = resp[idx:]
-    else:
-        inner = resp
-
-    fields = parse_protobuf_fields(inner)
-    map_data = fields.get(2, [b""])[0]
-    if not isinstance(map_data, bytes):
-        return []
-
-    mf = parse_protobuf_fields(map_data)
-    rooms = []
-    for room_bytes in mf.get(16, []):
-        if isinstance(room_bytes, bytes):
-            rf = parse_protobuf_fields(room_bytes)
-            room_id = rf.get(1, [0])[0]
-            sub_type = rf.get(2, [15])[0]
-            name = ROOM_NAMES.get(sub_type, f"Room-{sub_type}")
-            rooms.append((room_id, name))
-    return rooms
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Test Narwal room cleaning")
-    parser.add_argument("--rooms", type=str, default="", help="Comma-separated room IDs (default: all from map)")
-    parser.add_argument("--vacuum-only", action="store_true", help="Vacuum only mode (no mop)")
-    parser.add_argument("--mop-only", action="store_true", help="Mop only mode")
-    parser.add_argument("--passes", type=int, default=2, help="Number of passes (default: 2)")
-    parser.add_argument("--multi", type=str, default="", help="Multi-room test: comma-separated room IDs")
+async def main() -> None:
+    parser = argparse.ArgumentParser(description="Live room-clean test")
+    parser.add_argument("--rooms", default="", help="Comma-separated room ids (omit to list rooms)")
+    parser.add_argument("--mode", choices=MODES, default="vacuum-mop")
+    parser.add_argument("--fan", choices=FANS, default="normal")
+    parser.add_argument("--wetness", choices=WETNESS, default="normal")
+    parser.add_argument("--passes", type=int, default=1)
+    parser.add_argument("--run", type=int, default=30, help="Seconds to let it clean before stopping")
     args = parser.parse_args()
 
-    cfg = get_config()
-    user_uuid, token = cloud_login(cfg)
-    print(f"Logged in as {user_uuid[:8]}...")
-
-    mq = NarwalMQTT(cfg, user_uuid, token)
-    mq.connect()
-    mq.subscribe("status/robot_base_status")
-    print("Connected to MQTT")
-
-    vacuum_on = not args.mop_only
-    mop_on = not args.vacuum_only
-
-    if args.rooms:
-        room_ids = [(int(r.strip()), f"Room-{r.strip()}") for r in args.rooms.split(",")]
-    else:
-        print("Discovering rooms from map...")
-        room_ids = discover_rooms(mq, user_uuid)
-        if not room_ids:
-            print("No rooms found!")
-            mq.disconnect()
+    client = await connect_client()
+    state = client.state
+    try:
+        await client.request_status_update()
+        await client.fetch_map()
+        print(f"Robot: {state.status_text} ({state.activity}), battery {state.battery_level}%")
+        for room in state.rooms:
+            flag = "  [no-go]" if room.room_id in state.no_go_room_ids else ""
+            print(f"  room {room.room_id}: {room.display_name}{flag}")
+        if not args.rooms:
+            print("\nPass --rooms to start a clean.")
             return
-        print(f"Found {len(room_ids)} rooms: {room_ids}")
 
-    print(f"\nForce-stopping any running task...")
-    mq.send_command("task/force_end", auth_payload(user_uuid))
-    time.sleep(5)
+        rooms = [int(r) for r in args.rooms.split(",")]
+        print(f"\nStarting {args.mode} in rooms {rooms} (fan {args.fan}, wetness {args.wetness}, passes {args.passes})")
+        try:
+            resp = await client.start_clean(
+                rooms, MODES[args.mode], FANS[args.fan], WETNESS[args.wetness], args.passes,
+            )
+        except NarwalCommandError as err:
+            print(f"Rejected: {err}")
+            return
+        print(f"start_clean: {resp.result}")
 
-    for room_id, name in room_ids:
-        print(f"\n{name} (id={room_id})... ", end="", flush=True)
-        payload = build_clean_payload(
-            user_uuid, [room_id],
-            vacuum_on=vacuum_on, mop_on=mop_on, passes=args.passes,
-        )
-        resp = mq.send_command("clean/start_clean", payload)
-        code = parse_command_result(resp)
-        print(RESULT_NAMES.get(code, f"code={code}"), flush=True)
-
-        if code == 1:
-            time.sleep(3)
-            mq.send_command("task/force_end", auth_payload(user_uuid))
-            time.sleep(5)
+        if await wait_for(client, lambda s: s.activity == "cleaning", 60):
+            print(f"Cleaning: {state.status_text}")
+            end = time.monotonic() + args.run
+            while time.monotonic() < end:
+                await asyncio.sleep(5)
+                print(f"  {state.status_text} | fan {state.base.get('fanLevel')} | "
+                      f"room {state.current_room_id} | area {state.cleaned_area} m²")
         else:
-            time.sleep(2)
-
-    if args.multi:
-        multi_ids = [int(r.strip()) for r in args.multi.split(",")]
-        print(f"\nMulti-room test: {multi_ids}... ", end="", flush=True)
-        payload = build_clean_payload(
-            user_uuid, multi_ids,
-            vacuum_on=vacuum_on, mop_on=mop_on, passes=args.passes,
-        )
-        resp = mq.send_command("clean/start_clean", payload)
-        code = parse_command_result(resp)
-        print(RESULT_NAMES.get(code, f"code={code}"), flush=True)
-        if code == 1:
-            time.sleep(3)
-            mq.send_command("task/force_end", auth_payload(user_uuid))
-
-    mq.disconnect()
-    print("\nDone.")
+            print(f"Did not start cleaning within 60 s (status: {state.status_text})")
+    finally:
+        if state.is_cleaning or state.activity in ("paused", "returning"):
+            print("Stopping and returning to the dock...")
+            try:
+                await client.stop()
+                await asyncio.sleep(3)
+                await client.return_to_base()
+                docked = await wait_for(client, lambda s: s.activity == "docked", 240)
+                print("Docked." if docked else f"Not docked yet: {state.status_text}")
+            except NarwalCommandError as err:
+                print(f"Stop/return failed: {err}")
+        await client.disconnect()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
