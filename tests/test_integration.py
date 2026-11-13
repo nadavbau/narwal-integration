@@ -38,6 +38,7 @@ async def test_setup_and_states(hass: HomeAssistant, setup, robot) -> None:
     assert state.attributes["fan_speed"] == "Normal"
     assert state.attributes["rooms"] == {1: "Living Room", 2: "Galley", 3: "Toilet"}
     assert state.attributes["status"] == "Docked"
+    assert state.attributes["no_go_rooms"] == [3]
 
     assert hass.states.get(_eid(hass, "sensor", "battery")).state == "87.0"
     assert hass.states.get(_eid(hass, "sensor", "detergent")).state == "installed_and_empty"

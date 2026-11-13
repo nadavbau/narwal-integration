@@ -55,6 +55,17 @@ Other Narwal models using the same cloud platform should also work.
 
 The Device Name is the 32-character hex string that identifies your specific vacuum on the Narwal cloud. You can find it in the Narwal app's network traffic, or by checking the MQTT topics the vacuum subscribes to. It looks like: `abcdef1234567890abcdef1234567890`.
 
+## Lovelace card
+
+The integration registers a `custom:narwal-vacuum-card` automatically:
+
+```yaml
+type: custom:narwal-vacuum-card
+entity: vacuum.narwal_vacuum
+```
+
+It shows status, battery, error and maintenance banners, the live map, room selection (no-go rooms are disabled), cleaning mode, suction and mop wetness, start/pause/resume, stop, dock, locate, and dock actions (dry mops, wash and dry, empty dust bin). Related entities are found automatically from the vacuum's device; `camera_entity`, `battery_entity` and `mode_entity` can override them.
+
 ## Entities
 
 ### Vacuum

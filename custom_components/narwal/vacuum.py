@@ -101,6 +101,8 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         attrs: dict[str, Any] = {
             "status": state.status_text,
             "rooms": {r.room_id: r.display_name for r in state.rooms},
+            # Rooms marked no-go in the Narwal app; cleaning them is refused.
+            "no_go_rooms": sorted(state.no_go_room_ids),
         }
         if state.current_room_id and state.is_cleaning:
             room = next((r for r in state.rooms if r.room_id == state.current_room_id), None)
