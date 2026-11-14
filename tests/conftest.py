@@ -77,6 +77,10 @@ class FakeRobot:
         # requests have arrived (None = awake; float("inf") = never wakes).
         self.sleep_until_wake_requests: float | None = None
         self.wake_requests = 0
+        # Stale connection: replies stop reaching us (pushes still do) until
+        # the client reconnects.
+        self.stale = False
+        self.connects = 0
 
     def requests(self, command: str) -> list[bytes]:
         return [req for cmd, req in self.calls if cmd == command]
@@ -89,6 +93,8 @@ class FakeRobot:
         from custom_components.narwal.narwal_client.client import NarwalCommandError
 
         self.calls.append((command, request))
+        if self.stale:
+            raise NarwalCommandError(f"{command} timed out", timeout=True)
         if command == "common/active_robot_publish" and self.asleep:
             self.wake_requests += 1
             if self.wake_requests >= self.sleep_until_wake_requests:
@@ -182,6 +188,8 @@ def mock_robot(robot: FakeRobot):
         )
         self._connected.set()
         self.state.device_reachable = True
+        robot.connects += 1
+        robot.stale = False  # a fresh connection gets replies again
 
     def fake_send_blocking(self: NarwalClient, command: str, request: bytes, timeout: float) -> bytes:
         reply = robot.answer(command, request)
