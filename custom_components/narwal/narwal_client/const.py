@@ -21,6 +21,14 @@ WAKE_TIMEOUTS: tuple[float, ...] = (1, 1, 2, 2, 4, 4, 8, 8, 16, 30)
 # (while awake and registered it pushes status every ~2 s).
 ASLEEP_AFTER_SECONDS = 120
 
+# Product keys (first segment of the MQTT topic)
+PRODUCT_KEY_FREO_X_ULTRA = "EHf6cRNRGT"
+PRODUCT_KEY_FREO_X_PLUS = "3rIGshGNAj"
+MODEL_NAMES = {
+    PRODUCT_KEY_FREO_X_ULTRA: "Freo X Ultra",
+    PRODUCT_KEY_FREO_X_PLUS: "Freo X Plus",
+}
+
 # --- Command topics (client -> robot) ---
 TOPIC_CMD_YELL = "common/yell"
 TOPIC_CMD_REBOOT = "common/reboot"

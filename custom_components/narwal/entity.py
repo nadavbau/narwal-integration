@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import NarwalCoordinator
 from .narwal_client import NarwalCommandError, NarwalConnectionError, NarwalState
+from .narwal_client.const import MODEL_NAMES
 
 
 class NarwalEntity(CoordinatorEntity[NarwalCoordinator]):
@@ -29,7 +30,7 @@ class NarwalEntity(CoordinatorEntity[NarwalCoordinator]):
             identifiers={(DOMAIN, data["device_name"])},
             name=f"Narwal {data['product_key']}",
             manufacturer="Narwal",
-            model="Freo X Ultra",
+            model=MODEL_NAMES.get(data["product_key"], "Freo X Ultra"),
             sw_version=coordinator.client.state.firmware_version or None,
         )
 

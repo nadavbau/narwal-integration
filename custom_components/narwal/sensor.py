@@ -81,6 +81,7 @@ def _error_attrs(state: NarwalState) -> dict[str, Any]:
         "messages": [error_message(c) for c in state.error_codes],
         # Reported by the robot but not shown by the Narwal app (internal notices).
         "hidden_codes": [f"0x{c:08X}" for c in state.hidden_error_codes],
+        "reasons": state.error_reasons,
         "last_task_result": _slug(state.base.get("terminateReason"), "TASK_RESULT_"),
     }
 
