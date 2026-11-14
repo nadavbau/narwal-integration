@@ -84,6 +84,8 @@ name — with it every command times out silently (broker ACL).
 ### Known Product Key
 
 `EHf6cRNRGT` — Narwal Freo X Ultra.
+`hEA7OEshlx` — Narwal Freo Z Ultra (four suction levels too: Max is
+`FAN_LEVEL_DEEP`, per the app captures in PRs #4 and #6).
 `3rIGshGNAj` — Narwal Freo X Plus. Same protocol and schema, except:
 - suction: the app's Noise reduction / Standard / Turbo / Max are
   `FAN_LEVEL_MUTE` / `NORMAL` / `STRONG` / `DEEP` (no `SUPER`);

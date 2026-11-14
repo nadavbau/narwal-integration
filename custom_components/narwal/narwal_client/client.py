@@ -21,6 +21,7 @@ from .const import (
     COMMAND_RESPONSE_TIMEOUT,
     MQTT_BROKER,
     MQTT_PORT,
+    FOUR_LEVEL_SUCTION_PRODUCT_KEYS,
     PRODUCT_KEY_FREO_X_PLUS,
     SERVICE_RESULT_MESSAGES,
     TOPIC_CMD_ACTIVE_ROBOT,
@@ -131,10 +132,10 @@ class NarwalClient:
     ) -> None:
         self.product_key = product_key
         self.is_freo_x_plus = product_key == PRODUCT_KEY_FREO_X_PLUS
-        # The Freo X Plus app has 4 suction levels, Noise reduction /
-        # Standard / Turbo / Max = MUTE / NORMAL / STRONG / DEEP; it has no
-        # FAN_LEVEL_SUPER, so "Max" is DEEP there.
-        self.max_fan_level = FanLevel.DEEP if self.is_freo_x_plus else FanLevel.MAX
+        # Four-level models have no FAN_LEVEL_SUPER: "Max" is DEEP there.
+        self.max_fan_level = (
+            FanLevel.DEEP if product_key in FOUR_LEVEL_SUCTION_PRODUCT_KEYS else FanLevel.MAX
+        )
         self.device_name = device_name
         self.user_uuid = user_uuid
         self.broker = broker

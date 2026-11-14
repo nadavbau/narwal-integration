@@ -9,6 +9,7 @@ from custom_components.narwal.narwal_client.client import NarwalClient
 from custom_components.narwal.narwal_client.const import (
     PRODUCT_KEY_FREO_X_PLUS,
     PRODUCT_KEY_FREO_X_ULTRA,
+    PRODUCT_KEY_FREO_Z_ULTRA,
     CleanMode,
     FanLevel,
 )
@@ -52,8 +53,12 @@ def test_publish_qos0_with_reply_routing_in_frame() -> None:
     assert routing[2] == kwargs["properties"].CorrelationData[2:2 + len(routing[2])]
 
 
-def test_max_suction_is_deep_on_x_plus_only() -> None:
-    for key, expected in ((PRODUCT_KEY_FREO_X_PLUS, "FAN_LEVEL_DEEP"), (PRODUCT_KEY_FREO_X_ULTRA, "FAN_LEVEL_SUPER")):
+def test_max_suction_is_deep_on_four_level_models() -> None:
+    for key, expected in (
+        (PRODUCT_KEY_FREO_X_PLUS, "FAN_LEVEL_DEEP"),
+        (PRODUCT_KEY_FREO_Z_ULTRA, "FAN_LEVEL_DEEP"),
+        (PRODUCT_KEY_FREO_X_ULTRA, "FAN_LEVEL_SUPER"),
+    ):
         request = _client(key).build_clean_request([3], CleanMode.VACUUM_ONLY, FanLevel.MAX)
         assert decode("StartClean_Request", request)["task"]["items"][0]["param"]["fanLevel"] == expected
 
