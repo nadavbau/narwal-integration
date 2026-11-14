@@ -13,7 +13,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from . import NarwalConfigEntry
 from .const import CLEAN_MODE_LIST, CLEAN_MODE_MAP, CLEAN_MODE_REVERSE, MOP_HUMIDITY_MAP
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalEntity, entity_supported
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -71,7 +71,9 @@ async def async_setup_entry(
         NarwalCleanModeSelect(coordinator),
         NarwalMopHumiditySelect(coordinator),
     ]
-    entities += [NarwalConfigSelect(coordinator, d) for d in CONFIG_SELECTS]
+    entities += [
+        NarwalConfigSelect(coordinator, d) for d in CONFIG_SELECTS if entity_supported(coordinator, d.key)
+    ]
     async_add_entities(entities)
 
 
