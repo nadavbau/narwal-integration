@@ -207,3 +207,22 @@ async def test_map_camera(hass: HomeAssistant, setup) -> None:
 async def test_unload(hass: HomeAssistant, setup, config_entry) -> None:
     assert await hass.config_entries.async_unload(config_entry.entry_id)
     assert config_entry.state is ConfigEntryState.NOT_LOADED
+
+
+async def test_codes_the_app_hides_are_not_errors(hass: HomeAssistant, setup) -> None:
+    """Seen live: 0x01010072 (level 1) is reported but not in the app's table."""
+    idle_with_notice = {
+        "batteryPercentage": 100.0,
+        "robotTaskStatus": {"task": "TASK_TYPE_IDLE", "idleStatus": "IDLE_STATUS_IN_STATION"},
+        "stationContactType": "STATION_CONTACT_TYPE_CONTACTED",
+        "errorCode": [{"identityCode": 0x01010072, "level": 1}],
+    }
+    push(hass, setup.client, "status/robot_base_status", "RobotBaseStatus", idle_with_notice)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(VACUUM).state == VacuumActivity.DOCKED
+    assert hass.states.get(_eid(hass, "binary_sensor", "problem")).state == "off"
+    error = hass.states.get(_eid(hass, "sensor", "error"))
+    assert error.state == "No error"
+    assert error.attributes["hidden_codes"] == ["0x01010072"]
+    assert error.attributes["codes"] == []

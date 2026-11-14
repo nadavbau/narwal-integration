@@ -438,6 +438,10 @@ client is registered. Same units as §6.2.
 - `ErrorCode.identityCode` → message: `error_codes.py` (229 codes for this
   model from the app's own table; the app's product key `EHf6cRNRGT` is the
   **J4** platform internally).
+- The robot also reports codes the app has no message for and doesn't show
+  (seen live: `0x01010072`, level 1, mid-clean with every tank and module
+  normal). Only codes in the table count as errors; the rest are exposed as
+  `hidden_codes` on the Error sensor for diagnostics.
 - Consumables: `GetConsumableInfo_Response.consumableInfo` lists items **due**:
   `maintainItems` (`ConsumableMaintainItem`: DUST_BOX, DUST_FILTER,
   WASH_RIBS, UNIVERSAL_WHEEL, CLIFF_SENSOR, …) and `replaceItems`

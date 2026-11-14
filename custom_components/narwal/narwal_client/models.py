@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .error_codes import ERROR_MESSAGES
 from .const import ROOM_SUB_TYPE_NAMES, SUCCESS_RESULTS, FanLevel, MopHumidity
 from .proto import ProtoError, decode
 
@@ -286,12 +287,27 @@ class NarwalState:
         return None
 
     @property
-    def error_codes(self) -> list[int]:
+    def reported_error_codes(self) -> list[int]:
+        """Every code the robot reports, including ones the app never shows."""
         codes = []
         for err in self.base.get("errorCode", []) or []:
             if isinstance(err, dict) and err.get("identityCode"):
                 codes.append(int(err["identityCode"]))
         return codes
+
+    @property
+    def error_codes(self) -> list[int]:
+        """Errors the Narwal app would show: codes in its table for this model.
+
+        The robot also reports internal notices (seen live: 0x01010072, level
+        1, mid-clean with everything normal) that the app has no message for
+        and doesn't display; those must not raise errors in HA.
+        """
+        return [c for c in self.reported_error_codes if c in ERROR_MESSAGES]
+
+    @property
+    def hidden_error_codes(self) -> list[int]:
+        return [c for c in self.reported_error_codes if c not in ERROR_MESSAGES]
 
     @property
     def on_station(self) -> bool:
