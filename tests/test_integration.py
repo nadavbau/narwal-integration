@@ -64,7 +64,7 @@ async def test_start_skips_no_go_rooms(hass: HomeAssistant, setup, robot) -> Non
     assert [i["zone"]["zoneId"] for i in items] == [1, 2]
     assert items[0]["param"]["mode"] == "CLEAN_MODE_SWEEP_MOP_SYNC"
     assert items[0]["param"]["sweepMopSyncTime"] == 1
-    assert req["task"]["taskType"] == "TASK_TYPE_CUSTOM_CLEAN"
+    assert req["task"]["taskType"] == "TASK_TYPE_GENERAL_SWEEP_MOP_SYNC"  # what the app sends
 
 
 async def test_fan_speed_while_docked_applies_to_next_clean(hass: HomeAssistant, setup, robot) -> None:
@@ -91,7 +91,9 @@ async def test_clean_rooms_command(hass: HomeAssistant, setup, robot) -> None:
                     "mop_humidity": "wet", "passes": 2}},
         blocking=True,
     )
-    item = decode("StartClean_Request", robot.requests("clean/start_clean")[-1])["task"]["items"][0]
+    task = decode("StartClean_Request", robot.requests("clean/start_clean")[-1])["task"]
+    assert task["taskType"] == "TASK_TYPE_GENERAL_SWEEP_THEN_MOP"
+    item = task["items"][0]
     assert item["zone"] == {"zoneType": "ZONE_TYPE_ROOM", "zoneId": 2}
     assert item["param"] == {
         "mode": "CLEAN_MODE_SWEEP_THEN_MOP", "fanLevel": "FAN_LEVEL_STRONG",

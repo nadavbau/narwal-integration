@@ -22,7 +22,7 @@ Request = Narwal frame (`0x01` + varint(len) + `{1: uuid, 2: uuid}`) + encoded r
 
 ## Commands
 
-- Room clean: `clean/start_clean` with `StartClean_Request.task` = `CleanTask`, one `CleanItem` per room, `CleanParam` from **CleanTask.pb** (mode, fanLevel, mopHumidity, sweepTime/mopTime/sweepMopSyncTime), `taskType = TASK_TYPE_CUSTOM_CLEAN`. A second message named `CleanParam` exists in ReportBaseTypes.pb — don't use it.
+- Room clean: `clean/start_clean` with `StartClean_Request.task` = `CleanTask`, one `CleanItem` per room, `CleanParam` from **CleanTask.pb** (mode, fanLevel, mopHumidity, sweepTime/mopTime/sweepMopSyncTime), `taskType` = `TASK_TYPE_GENERAL_<mode>` like the app (`CUSTOM_CLEAN` only for per-room settings; see `CLEAN_MODE_TASK_TYPE`). A second message named `CleanParam` exists in ReportBaseTypes.pb — don't use it.
 - Rooms the map marks no-go (`ForbiddenArea` with `FORBIDDEN_MODE_ROOM`) make the robot refuse the whole task; skip them for whole-house cleans.
 - `clean/set_fan_level` / `clean/set_mop_humidity` are only accepted during a clean; while docked, store the choice and send it in the next task. Fan levels: 1 quiet … 3 strong, 5 max (0 = unspecified).
 - Settings: `config/get` / `config/set` share field names but NOT numbers (e.g. `disturbMode` is 4 in Get, 5 in Set). Explicit `false` must be sent to turn a setting off.

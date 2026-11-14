@@ -119,6 +119,17 @@ CLEAN_MODE_LABEL: dict[CleanMode, str] = {
     CleanMode.VACUUM_THEN_MOP: "CLEAN_MODE_SWEEP_THEN_MOP",
 }
 
+# CleanTask.taskType the Narwal app sends for a room clean where every room
+# uses the same mode (it sends TASK_TYPE_CUSTOM_CLEAN only when rooms have
+# individual settings). Decides how the robot and the app's history name
+# the task ("Vacuum then mop" vs "Custom clean").
+CLEAN_MODE_TASK_TYPE: dict[CleanMode, str] = {
+    CleanMode.VACUUM_ONLY: "TASK_TYPE_GENERAL_SWEEP",
+    CleanMode.MOP_ONLY: "TASK_TYPE_GENERAL_MOP",
+    CleanMode.VACUUM_AND_MOP: "TASK_TYPE_GENERAL_SWEEP_MOP_SYNC",
+    CleanMode.VACUUM_THEN_MOP: "TASK_TYPE_GENERAL_SWEEP_THEN_MOP",
+}
+
 # ServiceResult labels that mean the command was accepted.
 SUCCESS_RESULTS = frozenset({
     "SERVICE_RESULT_PERFORM_SUCCESS",

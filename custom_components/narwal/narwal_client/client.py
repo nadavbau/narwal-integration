@@ -19,6 +19,7 @@ from .const import (
     ASLEEP_AFTER_SECONDS,
     BROADCAST_TOPICS,
     CLEAN_MODE_LABEL,
+    CLEAN_MODE_TASK_TYPE,
     COMMAND_RESPONSE_TIMEOUT,
     MQTT_BROKER,
     MQTT_PORT,
@@ -744,7 +745,7 @@ class NarwalClient:
                 },
                 "order": order,
             })
-        task: dict[str, Any] = {"items": items, "taskType": "TASK_TYPE_CUSTOM_CLEAN"}
+        task: dict[str, Any] = {"items": items, "taskType": CLEAN_MODE_TASK_TYPE[mode]}
         if self.state.map and self.state.map.map_id:
             task["mapId"] = self.state.map.map_id
         return encode("StartClean_Request", {"task": task})

@@ -376,7 +376,9 @@ StartClean_Request
               4 mopHumidity = MopHumidity  (when mopping)
               5 sweepTime / 6 mopTime / 7 sweepMopSyncTime = passes for that phase
           3 order = 1, 2, …
-      5 taskType = TASK_TYPE_CUSTOM_CLEAN
+      5 taskType = TASK_TYPE_GENERAL_SWEEP / _MOP / _SWEEP_MOP_SYNC / _SWEEP_THEN_MOP
+                   (by mode; the app uses TASK_TYPE_CUSTOM_CLEAN only when rooms have
+                   individual settings, and the robot then reports "Custom clean")
 ```
 
 Live-verified. The robot answers
