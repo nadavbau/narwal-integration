@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalEntity, entity_supported
 from .narwal_client import NarwalClient
 
 
@@ -43,7 +43,9 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    async_add_entities(NarwalButton(coordinator, d) for d in BUTTONS)
+    async_add_entities(
+        NarwalButton(coordinator, d) for d in BUTTONS if entity_supported(coordinator, d.key)
+    )
 
 
 class NarwalButton(NarwalEntity, ButtonEntity):

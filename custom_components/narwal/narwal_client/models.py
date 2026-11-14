@@ -207,12 +207,32 @@ class NarwalState:
     preferred_fan_level: FanLevel | None = None
     preferred_mop_humidity: MopHumidity | None = None
     last_base_update: float = 0.0
+    # Faults currently reported (ErrorCode dicts with an identityCode).
+    faults: list[dict[str, Any]] = field(default_factory=list)
+    # Freo X Plus: it pushes a fault once, then only shows the interrupted
+    # task as paused, so the fault is held until the pause ends.
+    hold_faults_while_paused: bool = False
 
     # ---- update paths -------------------------------------------------
 
     def update_base_status(self, base: dict[str, Any]) -> None:
         prev = self.activity
         self.base = base
+        reported = [
+            e for e in base.get("errorCode", []) or []
+            if isinstance(e, dict) and e.get("identityCode")
+        ]
+        status = base.get("robotTaskStatus") or {}
+        if reported:
+            if [e["identityCode"] for e in reported] != self.error_codes:
+                _LOGGER.warning("Narwal fault: %s", reported)
+            self.faults = reported
+        elif not (
+            self.hold_faults_while_paused
+            and isinstance(status, dict)
+            and status.get("pauseStatus")
+        ):
+            self.faults = []
         self.last_base_update = time.time()
         if self.activity != prev:
             _LOGGER.info(
@@ -287,11 +307,17 @@ class NarwalState:
 
     @property
     def error_codes(self) -> list[int]:
-        codes = []
-        for err in self.base.get("errorCode", []) or []:
-            if isinstance(err, dict) and err.get("identityCode"):
-                codes.append(int(err["identityCode"]))
-        return codes
+        return [int(err["identityCode"]) for err in self.faults]
+
+    @property
+    def error_reasons(self) -> list[str]:
+        """English cause from each fault's debugDetail ('...原因:<cause>')."""
+        reasons = []
+        for err in self.faults:
+            text = err.get("debugDetail")
+            if isinstance(text, str) and text:
+                reasons.append(text.rsplit("原因:", 1)[-1].strip())
+        return reasons
 
     @property
     def on_station(self) -> bool:
@@ -310,7 +336,10 @@ class NarwalState:
     def activity(self) -> str:
         if not self.base:
             return ACTIVITY_IDLE
-        if self.error_codes and self.task in ("TASK_TYPE_IDLE", "TASK_TYPE_UNSPECIFIED"):
+        if self.error_codes and (
+            self.task in ("TASK_TYPE_IDLE", "TASK_TYPE_UNSPECIFIED")
+            or (self.hold_faults_while_paused and self.task_status.get("pauseStatus"))
+        ):
             return ACTIVITY_ERROR
         task, sub = self.task, self.sub_status
         if (

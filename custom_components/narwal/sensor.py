@@ -18,7 +18,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalEntity, entity_supported
 from .narwal_client import NarwalState
 from .narwal_client.error_codes import error_message
 from .narwal_client.proto import enum_labels
@@ -79,6 +79,7 @@ def _error_attrs(state: NarwalState) -> dict[str, Any]:
     return {
         "codes": [f"0x{c:08X}" for c in state.error_codes],
         "messages": [error_message(c) for c in state.error_codes],
+        "reasons": state.error_reasons,
         "last_task_result": _slug(state.base.get("terminateReason"), "TASK_RESULT_"),
     }
 
@@ -175,7 +176,9 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    async_add_entities(NarwalSensor(coordinator, d) for d in SENSORS)
+    async_add_entities(
+        NarwalSensor(coordinator, d) for d in SENSORS if entity_supported(coordinator, d.key)
+    )
 
 
 class NarwalSensor(NarwalEntity, SensorEntity):

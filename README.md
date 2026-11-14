@@ -30,6 +30,7 @@ A custom Home Assistant integration for **Narwal** robot vacuums (Freo X Ultra a
 This integration has been tested with:
 
 - Narwal Freo X Ultra
+- Narwal Freo X Plus (product key `3rIGshGNAj`): its app has four suction levels, so `Max` is the robot's highest level (`FAN_LEVEL_DEEP`). Its base only charges the robot, so the base-station entities (auto-empty, mop washing/drying, water tanks, detergent) are not created
 
 Other Narwal models using the same cloud platform should also work.
 
