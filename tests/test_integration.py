@@ -228,3 +228,17 @@ async def test_codes_the_app_hides_are_not_errors(hass: HomeAssistant, setup) ->
     assert error.state == "No error"
     assert error.attributes["hidden_codes"] == ["0x01010072"]
     assert error.attributes["codes"] == []
+
+
+async def test_clean_includes_map_id_without_loaded_map(hass: HomeAssistant, setup, robot) -> None:
+    """The robot rejects a task without mapId (seen live); fall back to the
+    map id it reports in its status when the map itself isn't loaded."""
+    client = setup.client
+    client.state.map = None
+    robot.answer_map = False  # map fetch fails this time
+    client.state.base["mapId"] = 1
+
+    await client.start_clean([2])
+
+    task = decode("StartClean_Request", robot.requests("clean/start_clean")[-1])["task"]
+    assert task["mapId"] == 1

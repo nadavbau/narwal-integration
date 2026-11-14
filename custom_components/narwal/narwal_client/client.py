@@ -746,8 +746,11 @@ class NarwalClient:
                 "order": order,
             })
         task: dict[str, Any] = {"items": items, "taskType": CLEAN_MODE_TASK_TYPE[mode]}
-        if self.state.map and self.state.map.map_id:
-            task["mapId"] = self.state.map.map_id
+        # The robot rejects a clean task without a map id (seen live). Prefer
+        # the loaded map's id, else the one the robot reports in its status.
+        map_id = self.state.current_map_id
+        if map_id:
+            task["mapId"] = map_id
         return encode("StartClean_Request", {"task": task})
 
     async def start_clean(
@@ -761,9 +764,11 @@ class NarwalClient:
         """Start cleaning the given rooms (all known rooms if none given)."""
         if self.probably_asleep():
             await self.wake()
+        if self.state.map is None or not self.state.rooms:
+            # Map not loaded yet (e.g. the robot was asleep at startup): load it
+            # now that the robot is awake, for room ids and the map id.
+            await self.fetch_rooms()
         if not room_ids:
-            if not self.state.rooms or self.state.map is None:
-                await self.fetch_rooms()
             room_ids = [
                 r.room_id for r in self.state.rooms
                 if r.room_id not in self.state.no_go_room_ids

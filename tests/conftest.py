@@ -81,6 +81,7 @@ class FakeRobot:
         # the client reconnects.
         self.stale = False
         self.connects = 0
+        self.answer_map = True
 
     def requests(self, command: str) -> list[bytes]:
         return [req for cmd, req in self.calls if cmd == command]
@@ -127,6 +128,8 @@ class FakeRobot:
             return frame(encode("GetFeatureList_Response", {"supportMultiMap": True}))
         if command == "common/upgrade/get_firmware_version":
             return frame(encode("GetFirmwareVersion_Response", {"firmwareVersionText": "v01.09.01.00"}))
+        if command == "map/get_map" and not self.answer_map:
+            raise NarwalCommandError(f"{command} timed out", timeout=True)
         if command == "map/get_map":
             return frame(encode("GetMap_Response", {**ok, "map": {
                 "mapId": 1, "resolution": 60, "width": 20, "height": 10,

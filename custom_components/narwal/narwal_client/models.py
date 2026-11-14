@@ -280,6 +280,14 @@ class NarwalState:
         return ""
 
     @property
+    def current_map_id(self) -> int | None:
+        """The active map's id: from the loaded map, else from robot status."""
+        if self.map and self.map.map_id:
+            return self.map.map_id
+        value = self.base.get("mapId")
+        return int(value) if isinstance(value, int) and value else None
+
+    @property
     def battery_level(self) -> float | None:
         value = self.base.get("batteryPercentage")
         if isinstance(value, (int, float)):
