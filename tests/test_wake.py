@@ -132,3 +132,52 @@ async def test_stale_connection_is_healed_by_polling(hass: HomeAssistant, setup,
 
     assert robot.connects == connects_before + 1
     assert not robot.stale
+
+
+async def test_dozing_robot_reset_then_woken(hass: HomeAssistant, setup, robot) -> None:
+    """Seen live while drying mops: still broadcasting, but asleep. Reset alone
+    doesn't help, so the wake-up must follow."""
+    robot.sleep_until_wake_requests = 3
+    robot.wake_requests = 0
+    robot.calls.clear()
+    connects_before = robot.connects
+    client = setup.client
+    client.last_message_time = client.last_push_time = time.time()
+
+    await hass.services.async_call("vacuum", "locate", {"entity_id": VACUUM}, blocking=True)
+
+    sent = [cmd for cmd, _ in robot.calls]
+    assert robot.connects == connects_before + 1                 # reset tried first
+    assert sent.count("common/yell") == 3                        # original, after reset, after wake
+    assert sent.count("common/active_robot_publish") == 3        # woken on the 3rd attempt
+    assert not robot.asleep
+
+
+async def test_replies_are_matched_by_correlation_id(hass: HomeAssistant, setup) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    client = setup.client
+    topic = f"{client.base_topic}/status/get_device_base_status/response"
+    ours, theirs = b"ours", b"theirs"
+    event = threading.Event()
+    holder = [None]
+    client._pending_responses[ours] = (event, holder)
+    client._pending_by_topic[topic] = ours
+
+    # Another client's reply on the same topic must not satisfy our request.
+    client._on_message(None, None, SimpleNamespace(
+        topic=topic, payload=b"not ours", properties=SimpleNamespace(CorrelationData=theirs)))
+    assert not event.is_set()
+
+    client._on_message(None, None, SimpleNamespace(
+        topic=topic, payload=b"ours!", properties=SimpleNamespace(CorrelationData=ours)))
+    assert event.is_set() and holder[0] == b"ours!"
+    assert topic not in client._pending_by_topic
+
+    # A reply without correlation data falls back to the topic.
+    event2, holder2 = threading.Event(), [None]
+    client._pending_responses[b"x"] = (event2, holder2)
+    client._pending_by_topic[topic] = b"x"
+    client._on_message(None, None, SimpleNamespace(topic=topic, payload=b"legacy", properties=None))
+    assert event2.is_set() and holder2[0] == b"legacy"

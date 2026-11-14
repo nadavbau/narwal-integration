@@ -245,16 +245,25 @@ routing near JWT expiry, so the coordinator refreshes the token and
 reconnects after 3 unexplained poll failures, on token expiry, or when a
 wake-up gets no answer at all.
 
-### Stale connections
+### Shared replies and correlation
 
-Seen live: after some hours, a long-lived client kept receiving the robot's
-broadcasts but no replies to its own requests, even after reconnecting the
-MQTT client; a fresh client (or reloading the integration) worked at once.
-The client now treats "request timed out while broadcasts are arriving" as a
-stale connection, not sleep: it rebuilds the connection with all request
-state cleared (`NarwalClient.reset_connection()`) and resends. Status polls
-do the same, and SUBACK refusals are logged and retried instead of being
-assumed successful. The exact trigger is still unknown.
+Every client logged in to the account receives every reply: HA sees the
+replies to the app's requests (and vice versa), because they all subscribe
+to the same `/response` topics. The robot echoes the request's MQTT5
+`CorrelationData` in its reply, so the client matches replies by it (and
+falls back to the topic only for a reply without one).
+
+### Requests that time out while the robot is broadcasting
+
+Seen live: a few minutes into drying the mops, the robot stopped answering
+requests, kept broadcasting status for ~1 min, then went quiet (status stays
+"Mop care: dry") — it dozes off. Separately, HA's long-lived connection once
+kept missing replies during an active clean until the integration was
+reloaded. The client handles both the same way: on a timeout while
+broadcasts were arriving, rebuild the connection
+(`NarwalClient.reset_connection()`) and resend; if there's still no answer,
+run the wake-up and resend once more. Status polls only reset, never wake.
+SUBACK refusals are logged and retried instead of being assumed successful.
 
 ## 5. Status and Requests
 

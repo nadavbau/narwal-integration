@@ -151,7 +151,11 @@ class NarwalClient:
         self._client: mqtt.Client | None = None
         self._connected = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._pending_responses: dict[str, tuple[threading.Event, list[bytes | None]]] = {}
+        # Pending requests keyed by the CorrelationData we sent; the robot echoes
+        # it in the reply. Every client on the account receives every reply, so
+        # matching by topic alone could hand us another client's answer.
+        self._pending_responses: dict[bytes, tuple[threading.Event, list[bytes | None]]] = {}
+        self._pending_by_topic: dict[str, bytes] = {}  # fallback for replies without one
         self._pending_subacks: dict[int, threading.Event] = {}
         self._sub_topics: dict[int, str] = {}  # SUBSCRIBE mid -> topic
         self._subscribed: set[str] = set()
@@ -264,6 +268,26 @@ class NarwalClient:
         if evt:
             evt.set()
 
+    def _handle_reply(self, msg) -> None:
+        props = getattr(msg, "properties", None)
+        corr = getattr(props, "CorrelationData", None) if props is not None else None
+        if corr:
+            corr = bytes(corr)
+            pending = self._pending_responses.pop(corr, None)
+            if pending is None:
+                _LOGGER.debug("Reply on %s is for another client or arrived late", msg.topic.rsplit("/", 2)[-2])
+                return
+            if self._pending_by_topic.get(msg.topic) == corr:
+                del self._pending_by_topic[msg.topic]
+        else:
+            key = self._pending_by_topic.pop(msg.topic, None)
+            pending = self._pending_responses.pop(key, None) if key is not None else None
+            if pending is None:
+                return
+        event, holder = pending
+        holder[0] = msg.payload
+        event.set()
+
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         _LOGGER.warning("MQTT disconnected: %s", reason_code)
         self._connected.clear()
@@ -285,18 +309,13 @@ class NarwalClient:
 
     def _on_message(self, client, userdata, msg):
         self.last_message_time = time.time()
-        pending = self._pending_responses.pop(msg.topic, None)
-        if pending:
-            event, holder = pending
-            holder[0] = msg.payload
-            event.set()
+        if msg.topic.endswith("/response"):
+            self._handle_reply(msg)
             return
 
         suffix = msg.topic[len(self.base_topic):].lstrip("/")
         msg_type = _PUSH_TYPES.get(suffix)
         if not msg_type:
-            if msg.topic.endswith("/response"):
-                _LOGGER.debug("Late or unmatched reply on %s", suffix)
             return
         self.last_push_time = time.time()
         try:
@@ -352,31 +371,39 @@ class NarwalClient:
         except NarwalCommandError as err:
             if not (retry and err.timeout):
                 raise
-            if self.pushing_recently():
-                # The robot is awake and its broadcasts reach us, but its reply
-                # didn't: our connection has gone stale. Rebuild it and resend.
-                _LOGGER.warning(
-                    "%s timed out while the robot is broadcasting; resetting the connection", command,
-                )
-                await self.reset_connection()
-                raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
-                resp = CommandResponse.parse(command, raw, rtype)
-                if check and not resp.success:
-                    reason = SERVICE_RESULT_MESSAGES.get(str(resp.result), str(resp.result))
-                    raise NarwalCommandError(f"{command}: {reason}", result=resp.result) from err
-                return resp
-            _LOGGER.info("%s timed out; waking the robot and retrying", command)
-            if not await self.wake():
-                raise NarwalCommandError(
-                    f"{command}: the robot did not wake up", timeout=True
-                ) from err
-            raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+            raw = await self._recover_and_resend(command, request, timeout, err)
 
         resp = CommandResponse.parse(command, raw, rtype)
         if check and not resp.success:
             reason = SERVICE_RESULT_MESSAGES.get(str(resp.result), str(resp.result))
             raise NarwalCommandError(f"{command}: {reason}", result=resp.result)
         return resp
+
+    async def _recover_and_resend(
+        self, command: str, request: bytes, timeout: float, err: NarwalCommandError,
+    ) -> bytes:
+        """A command timed out: recover, then send it again.
+
+        Seen live, two causes look alike at first: the robot dozing off (while
+        drying mops it stops answering, keeps broadcasting for ~1 min, then goes
+        quiet) and a connection that stops receiving replies. If the robot was
+        broadcasting a moment ago, rebuild the connection and resend; if it
+        still doesn't answer, or was already quiet, wake it and resend.
+        """
+        loop = self._loop or asyncio.get_running_loop()
+        if self.pushing_recently():
+            _LOGGER.warning("%s timed out while the robot was broadcasting; resetting the connection", command)
+            await self.reset_connection()
+            try:
+                return await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+            except NarwalCommandError as retry_err:
+                if not retry_err.timeout:
+                    raise
+                err = retry_err
+        _LOGGER.info("%s timed out; waking the robot and retrying", command)
+        if not await self.wake():
+            raise NarwalCommandError(f"{command}: the robot did not wake up", timeout=True) from err
+        return await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
 
     def pushing_recently(self, window: float = 15.0) -> bool:
         """True if a status broadcast arrived in the last ``window`` seconds."""
@@ -397,6 +424,7 @@ class NarwalClient:
             for event, _holder in list(self._pending_responses.values()):
                 event.set()  # release anyone still waiting on the old client
             self._pending_responses.clear()
+            self._pending_by_topic.clear()
             self._pending_subacks.clear()
             self._sub_topics.clear()
             self._subscribed.clear()
@@ -474,13 +502,15 @@ class NarwalClient:
             self._ensure_subscribed(response_topic)
             event = threading.Event()
             holder: list[bytes | None] = [None]
-            self._pending_responses[response_topic] = (event, holder)
-            self._client.publish(
-                topic, self._auth_frame() + request, qos=1,
-                properties=self._build_publish_properties(topic),
-            )
+            props = self._build_publish_properties(topic)
+            corr = bytes(props.CorrelationData)
+            self._pending_responses[corr] = (event, holder)
+            self._pending_by_topic[response_topic] = corr
+            self._client.publish(topic, self._auth_frame() + request, qos=1, properties=props)
             if not event.wait(timeout=timeout):
-                self._pending_responses.pop(response_topic, None)
+                self._pending_responses.pop(corr, None)
+                if self._pending_by_topic.get(response_topic) == corr:
+                    del self._pending_by_topic[response_topic]
                 raise NarwalCommandError(f"{command} timed out", timeout=True)
             if holder[0] is None:  # released by reset_connection(), no reply
                 raise NarwalCommandError(f"{command} interrupted by a reconnect", timeout=True)
