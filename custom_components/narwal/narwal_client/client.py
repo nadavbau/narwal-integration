@@ -189,14 +189,25 @@ class NarwalClient:
     # Framing
     # ------------------------------------------------------------------
 
-    def _auth_frame(self) -> bytes:
-        """0x01 + varint(len) + {1: uuid, 2: uuid}; every request starts with it."""
-        inner = _pb_string(1, self.user_uuid) + _pb_string(2, self.user_uuid)
+    def _auth_frame(self, response_topic: str, request_id: str) -> bytes:
+        """0x01 + varint(len) + {1: uuid, 2: uuid, 5: routing}; every request starts with it.
+
+        Like the app, the reply routing also goes INSIDE the frame as field
+        5 = {1: response_topic, 2: request_id}. Without it the robot only
+        answers while fully awake: it ignores the MQTT5 ResponseTopic
+        property once it dozes off (~10 min after the last app activity).
+        """
+        routing = _pb_string(1, response_topic) + _pb_string(2, request_id)
+        inner = (
+            _pb_string(1, self.user_uuid)
+            + _pb_string(2, self.user_uuid)
+            + _pb_string(5, routing)
+        )
         return b"\x01" + encode_varint(len(inner)) + inner
 
-    def _build_publish_properties(self, topic: str) -> Properties:
+    def _build_publish_properties(self, topic: str, request_id: str) -> Properties:
         corr = (
-            _pb_string(1, str(uuid.uuid1()))
+            _pb_string(1, request_id)
             + _pb_varint(3, 0)
             + _pb_varint(4, int(time.time() * 1000))
         )
@@ -510,11 +521,15 @@ class NarwalClient:
             self._ensure_subscribed(response_topic)
             event = threading.Event()
             holder: list[bytes | None] = [None]
-            props = self._build_publish_properties(topic)
+            request_id = str(uuid.uuid1())
+            props = self._build_publish_properties(topic, request_id)
             corr = bytes(props.CorrelationData)
             self._pending_responses[corr] = (event, holder)
             self._pending_by_topic[response_topic] = corr
-            self._client.publish(topic, self._auth_frame() + request, qos=PUBLISH_QOS, properties=props)
+            self._client.publish(
+                topic, self._auth_frame(response_topic, request_id) + request,
+                qos=PUBLISH_QOS, properties=props,
+            )
             if not event.wait(timeout=timeout):
                 self._pending_responses.pop(corr, None)
                 if self._pending_by_topic.get(response_topic) == corr:
@@ -528,9 +543,10 @@ class NarwalClient:
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
         topic = f"{self.base_topic}/{command}"
+        request_id = str(uuid.uuid1())
         self._client.publish(
-            topic, self._auth_frame() + request, qos=PUBLISH_QOS,
-            properties=self._build_publish_properties(topic),
+            topic, self._auth_frame(f"{topic}/response", request_id) + request,
+            qos=PUBLISH_QOS, properties=self._build_publish_properties(topic, request_id),
         )
 
     @staticmethod
