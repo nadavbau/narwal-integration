@@ -21,6 +21,7 @@ from .const import (
     COMMAND_RESPONSE_TIMEOUT,
     MQTT_BROKER,
     MQTT_PORT,
+    PRODUCT_KEY_FREO_X_PLUS,
     SERVICE_RESULT_MESSAGES,
     TOPIC_CMD_ACTIVE_ROBOT,
     TOPIC_CMD_DRY_MOP,
@@ -129,12 +130,17 @@ class NarwalClient:
         port: int = MQTT_PORT,
     ) -> None:
         self.product_key = product_key
+        self.is_freo_x_plus = product_key == PRODUCT_KEY_FREO_X_PLUS
+        # The Freo X Plus app has 4 suction levels, Noise reduction /
+        # Standard / Turbo / Max = MUTE / NORMAL / STRONG / DEEP; it has no
+        # FAN_LEVEL_SUPER, so "Max" is DEEP there.
+        self.max_fan_level = FanLevel.DEEP if self.is_freo_x_plus else FanLevel.MAX
         self.device_name = device_name
         self.user_uuid = user_uuid
         self.broker = broker
         self.port = port
 
-        self.state = NarwalState()
+        self.state = NarwalState(hold_faults_while_paused=self.is_freo_x_plus)
         self.on_state_update: Callable[[NarwalState], None] | None = None
 
         self._mqtt_username = mqtt_username
@@ -491,6 +497,10 @@ class NarwalClient:
         return await self.send_command(TOPIC_CMD_RESUME)
 
     async def stop(self) -> CommandResponse:
+        if self.is_freo_x_plus:
+            # Same request as the Freo X Plus app: exceptTasks =
+            # [DRY_STATION_BAG, STATION_BAG_STERILIZATION] (packed).
+            return await self.send_command(TOPIC_CMD_FORCE_END, _pb_string(2, b"\x01\x02"))
         return await self.send_command(TOPIC_CMD_FORCE_END)
 
     async def return_to_base(self) -> CommandResponse:
@@ -511,6 +521,8 @@ class NarwalClient:
     async def set_fan_speed(self, level: FanLevel) -> CommandResponse | None:
         """Change suction. The robot only accepts this during a clean, so
         while docked the choice is remembered and sent with the next clean."""
+        if level == FanLevel.MAX:
+            level = self.max_fan_level
         self.state.preferred_fan_level = level
         resp = None
         if self.state.is_cleaning:
@@ -571,6 +583,8 @@ class NarwalClient:
     ) -> bytes:
         """Encode a StartClean_Request: one CleanItem per room, in order."""
         fan = fan_level or self.state.fan_level or FanLevel.NORMAL
+        if fan == FanLevel.MAX:
+            fan = self.max_fan_level
         mop = mop_humidity or self.state.mop_humidity or MopHumidity.NORMAL
         vacuum = mode in (CleanMode.VACUUM_ONLY, CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP)
         mopping = mode in (CleanMode.MOP_ONLY, CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP)

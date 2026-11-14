@@ -13,6 +13,14 @@ MQTT_PORT = 8883
 
 COMMAND_RESPONSE_TIMEOUT = 10.0
 
+# Product keys (first segment of the MQTT topic)
+PRODUCT_KEY_FREO_X_ULTRA = "EHf6cRNRGT"
+PRODUCT_KEY_FREO_X_PLUS = "3rIGshGNAj"
+MODEL_NAMES = {
+    PRODUCT_KEY_FREO_X_ULTRA: "Freo X Ultra",
+    PRODUCT_KEY_FREO_X_PLUS: "Freo X Plus",
+}
+
 # --- Command topics (client -> robot) ---
 TOPIC_CMD_YELL = "common/yell"
 TOPIC_CMD_REBOOT = "common/reboot"

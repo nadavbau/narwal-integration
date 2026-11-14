@@ -83,7 +83,14 @@ name — with it every command times out silently (broker ACL).
 
 ### Known Product Key
 
-`EHf6cRNRGT` — Narwal Freo X Ultra. This may differ for other models.
+`EHf6cRNRGT` — Narwal Freo X Ultra.
+`3rIGshGNAj` — Narwal Freo X Plus. Same protocol and schema, except:
+- suction: the app's Noise reduction / Standard / Turbo / Max are
+  `FAN_LEVEL_MUTE` / `NORMAL` / `STRONG` / `DEEP` (no `SUPER`);
+- faults: `errorCode` is pushed once, then the interrupted task just shows
+  `pauseStatus` (the next pushes carry an empty `ErrorCode`);
+- `task/force_end`: the app sends `exceptTasks = [1, 2]`
+  (`DRY_STATION_BAG`, `STATION_BAG_STERILIZATION`, packed).
 
 ---
 
@@ -126,17 +133,26 @@ command time out silently.
 
 1. Make sure `{base_topic}/{command}/response` is subscribed (pre-subscribed
    on connect; otherwise subscribe and wait for SUBACK)
-2. Publish to `{base_topic}/{command}` with MQTT5 properties:
+2. Publish at **QoS 0** (like the app) to `{base_topic}/{command}` with MQTT5 properties:
    - `ResponseTopic`: the response topic string
    - `CorrelationData`: protobuf with request UUID, zero, and timestamp
 3. Wait for the reply on the response topic (timeout varies by command)
+
+The broker never PUBACKs app publishes. At QoS 1 paho keeps every publish
+in flight; once its window (20) is full, every later publish is queued
+locally and never sent, so all commands time out until a reconnect
+(measured on `eu-01`: 0/25 QoS 1 publishes acknowledged, the next QoS 1
+command timed out, a QoS 0 one was answered in 0.7 s).
 
 ### Payload Framing (Narwal Frame)
 
 All payloads use a custom framing: `0x01 + varint(inner_length) + inner_protobuf`
 
 The framed protobuf is the user identity: field 1 and field 2 are both the
-user UUID. The command's request message (§3) is appended **after** the
+user UUID. Like the app, field 5 carries the reply routing
+`{1: response_topic, 2: request_id}` (same id as in `CorrelationData`):
+without it a dozing robot ignores the MQTT5 `ResponseTopic` property and
+only answers once woken. The command's request message (§3) is appended **after** the
 frame, not inside it.
 
 ### Response Framing

@@ -18,6 +18,7 @@ from . import NarwalConfigEntry
 from .const import CLEAN_MODE_MAP, FAN_SPEED_LIST, FAN_SPEED_MAP, FAN_SPEED_REVERSE, MOP_HUMIDITY_MAP
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
+from .narwal_client.error_codes import error_message
 from .narwal_client import CleanMode, FanLevel, MopHumidity
 from .narwal_client.models import (
     ACTIVITY_CLEANING,
@@ -93,6 +94,8 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
     @property
     def fan_speed(self) -> str | None:
         level = self.state_data.fan_level
+        if level and level == self.coordinator.client.max_fan_level:
+            return "Max"
         return FAN_SPEED_REVERSE.get(level) if level else None
 
     @property
@@ -109,6 +112,14 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             attrs["current_room"] = room.display_name if room else state.current_room_id
         if state.mop_humidity:
             attrs["mop_humidity"] = state.mop_humidity.name.lower()
+        if state.error_codes:
+            # Also here (not only on the error sensor) so automations
+            # triggered by the vacuum turning to "error" see the cause:
+            # the sensor's state is written after the vacuum's.
+            code = state.error_codes[0]
+            attrs["error_code"] = f"0x{code:08X}"
+            reasons = state.error_reasons
+            attrs["error_reason"] = reasons[0] if reasons else error_message(code)
         return attrs
 
     # ---- basic control -------------------------------------------------
