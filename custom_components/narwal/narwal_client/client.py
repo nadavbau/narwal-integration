@@ -16,13 +16,16 @@ from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 from .const import (
+    ASLEEP_AFTER_SECONDS,
     BROADCAST_TOPICS,
     CLEAN_MODE_LABEL,
+    CLEAN_MODE_TASK_TYPE,
     COMMAND_RESPONSE_TIMEOUT,
     MQTT_BROKER,
     MQTT_PORT,
     SERVICE_RESULT_MESSAGES,
     TOPIC_CMD_ACTIVE_ROBOT,
+    TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_DRY_MOP,
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_FORCE_END,
@@ -48,6 +51,7 @@ from .const import (
     TOPIC_ROBOT_BASE_STATUS,
     TOPIC_UPGRADE_STATUS,
     TOPIC_WORKING_STATUS,
+    WAKE_TIMEOUTS,
     CleanMode,
     FanLevel,
     MopHumidity,
@@ -57,8 +61,17 @@ from .proto import ProtoError, decode, encode, encode_varint
 
 _LOGGER = logging.getLogger(__name__)
 
+# Narwal's broker never PUBACKs our QoS 1 publishes (seen live: every message,
+# answered or not, stays in paho's in-flight queue). After paho's in-flight
+# limit (20) the client silently stops sending, so commands and keepalives
+# never leave and HA goes deaf 10-20 minutes after connecting. Publish at QoS
+# 0; the robot answers just the same and our reply timeouts cover losses.
+PUBLISH_QOS = 0
+
 # Response message type for each command we decode.
 RESPONSE_TYPES: dict[str, str] = {
+    TOPIC_CMD_ACTIVE_ROBOT: "ActiveRobotPublish_Response",
+    TOPIC_CMD_NOTIFY_APP_EVENT: "NotifyAppEvent_Response",
     TOPIC_CMD_GET_BASE_STATUS: "GetDeviceBaseStatus_Response",
     TOPIC_CMD_GET_CONFIG: "GetConfig_Response",
     TOPIC_CMD_SET_CONFIG: "SetConfig_Response",
@@ -77,6 +90,7 @@ _GENERIC_RESULT = "SetFanLevel_Response"
 # explicit subscriptions, so pre-subscribing saves a SUBACK round trip per
 # command (previously a fixed 0.5 s sleep on every call).
 _PRESUBSCRIBE = (
+    TOPIC_CMD_ACTIVE_ROBOT, TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_GET_BASE_STATUS, TOPIC_CMD_GET_CONFIG, TOPIC_CMD_SET_CONFIG,
     TOPIC_CMD_GET_CONSUMABLE, TOPIC_CMD_GET_MAP, TOPIC_CMD_YELL, TOPIC_CMD_PAUSE,
     TOPIC_CMD_RESUME, TOPIC_CMD_FORCE_END, TOPIC_CMD_RECALL, TOPIC_CMD_START_CLEAN,
@@ -145,12 +159,23 @@ class NarwalClient:
         self._client: mqtt.Client | None = None
         self._connected = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._pending_responses: dict[str, tuple[threading.Event, list[bytes | None]]] = {}
+        # Pending requests keyed by the CorrelationData we sent; the robot echoes
+        # it in the reply. Every client on the account receives every reply, so
+        # matching by topic alone could hand us another client's answer.
+        self._pending_responses: dict[bytes, tuple[threading.Event, list[bytes | None]]] = {}
+        self._pending_by_topic: dict[str, bytes] = {}  # fallback for replies without one
         self._pending_subacks: dict[int, threading.Event] = {}
+        self._sub_topics: dict[int, str] = {}  # SUBSCRIBE mid -> topic
         self._subscribed: set[str] = set()
+        self._reset_lock: asyncio.Lock | None = None
+        self.last_push_time: float = 0.0
+        self.last_reset_time: float = 0.0
         self._sub_lock = threading.Lock()
         self._command_locks: dict[str, threading.Lock] = {}
+        self._wake_lock: asyncio.Lock | None = None
         self.last_message_time: float = 0.0
+        self.last_wake_time: float = 0.0
+        self.needs_reconnect = False
 
     @property
     def base_topic(self) -> str:
@@ -223,19 +248,53 @@ class NarwalClient:
             return
         _LOGGER.info("MQTT connected (%s)", self.base_topic)
         self._subscribed.clear()
+        self._sub_topics.clear()
         topics = [f"{self.base_topic}/{t}" for t in BROADCAST_TOPICS]
         topics += [f"{self.base_topic}/{t}/response" for t in _PRESUBSCRIBE]
         for topic in topics:
-            client.subscribe(topic, qos=1)
-            self._subscribed.add(topic)
+            rc, mid = client.subscribe(topic, qos=1)
+            if rc == 0:
+                # Optimistic: _on_subscribe removes it again if the broker refuses.
+                self._sub_topics[mid] = topic
+                self._subscribed.add(topic)
+            else:
+                _LOGGER.warning("SUBSCRIBE %s not sent (rc=%s)", topic, rc)
         self._connected.set()
         self.state.device_reachable = True
         self._notify_state_update()
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        topic = self._sub_topics.pop(mid, None)
+        codes = reason_codes if isinstance(reason_codes, list) else [reason_codes]
+        failed = [c for c in codes if getattr(c, "is_failure", False)]
+        if failed and topic:
+            # Without this subscription the robot's replies never arrive, so
+            # forget it; _ensure_subscribed retries before the next command.
+            self._subscribed.discard(topic)
+            _LOGGER.warning("Broker refused subscription to %s: %s", topic, failed)
         evt = self._pending_subacks.pop(mid, None)
         if evt:
             evt.set()
+
+    def _handle_reply(self, msg) -> None:
+        props = getattr(msg, "properties", None)
+        corr = getattr(props, "CorrelationData", None) if props is not None else None
+        if corr:
+            corr = bytes(corr)
+            pending = self._pending_responses.pop(corr, None)
+            if pending is None:
+                _LOGGER.debug("Reply on %s is for another client or arrived late", msg.topic.rsplit("/", 2)[-2])
+                return
+            if self._pending_by_topic.get(msg.topic) == corr:
+                del self._pending_by_topic[msg.topic]
+        else:
+            key = self._pending_by_topic.pop(msg.topic, None)
+            pending = self._pending_responses.pop(key, None) if key is not None else None
+            if pending is None:
+                return
+        event, holder = pending
+        holder[0] = msg.payload
+        event.set()
 
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         _LOGGER.warning("MQTT disconnected: %s", reason_code)
@@ -258,17 +317,15 @@ class NarwalClient:
 
     def _on_message(self, client, userdata, msg):
         self.last_message_time = time.time()
-        pending = self._pending_responses.pop(msg.topic, None)
-        if pending:
-            event, holder = pending
-            holder[0] = msg.payload
-            event.set()
+        if msg.topic.endswith("/response"):
+            self._handle_reply(msg)
             return
 
         suffix = msg.topic[len(self.base_topic):].lstrip("/")
         msg_type = _PUSH_TYPES.get(suffix)
         if not msg_type:
             return
+        self.last_push_time = time.time()
         try:
             data = decode(msg_type, strip_narwal_frame(msg.payload))
         except ProtoError:
@@ -298,27 +355,31 @@ class NarwalClient:
         response_type: str | None = None,
         check: bool = True,
         retry: bool = True,
+        wake: bool = True,
     ) -> CommandResponse:
         """Send ``command`` with an encoded request body; wait for the reply.
 
-        On timeout the robot is usually in deep sleep: re-announce ourselves
-        (which wakes it) and retry once. With ``check`` a non-success
-        ServiceResult raises NarwalCommandError with a readable reason.
+        A robot in deep sleep keeps its MQTT connection but ignores commands.
+        With ``wake`` (user actions), a robot that looks asleep is woken first;
+        with ``retry``, a timed-out command triggers a full wake-up and is sent
+        once more after the robot has answered. Background reads pass
+        ``wake=False, retry=False`` so polling never wakes the robot.
+        With ``check`` a non-success ServiceResult raises NarwalCommandError
+        with a readable reason.
         """
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
         loop = self._loop or asyncio.get_running_loop()
         # response_type=None -> look up / generic ServiceResult; "" -> don't decode.
         rtype = RESPONSE_TYPES.get(command, _GENERIC_RESULT) if response_type is None else response_type
+        if wake and self.probably_asleep():
+            await self.wake()
         try:
             raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
         except NarwalCommandError as err:
             if not (retry and err.timeout):
                 raise
-            _LOGGER.info("%s timed out; waking robot and retrying once", command)
-            await self.notify_active()
-            await asyncio.sleep(1.5)
-            raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+            raw = await self._recover_and_resend(command, request, timeout, err)
 
         resp = CommandResponse.parse(command, raw, rtype)
         if check and not resp.success:
@@ -326,16 +387,120 @@ class NarwalClient:
             raise NarwalCommandError(f"{command}: {reason}", result=resp.result)
         return resp
 
+    async def _recover_and_resend(
+        self, command: str, request: bytes, timeout: float, err: NarwalCommandError,
+    ) -> bytes:
+        """A command timed out: recover, then send it again.
+
+        Seen live, two causes look alike at first: the robot dozing off (while
+        drying mops it stops answering, keeps broadcasting for ~1 min, then goes
+        quiet) and a connection that stops receiving replies. If the robot was
+        broadcasting a moment ago, rebuild the connection and resend; if it
+        still doesn't answer, or was already quiet, wake it and resend.
+        """
+        loop = self._loop or asyncio.get_running_loop()
+        if self.pushing_recently():
+            _LOGGER.warning("%s timed out while the robot was broadcasting; resetting the connection", command)
+            await self.reset_connection()
+            try:
+                return await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+            except NarwalCommandError as retry_err:
+                if not retry_err.timeout:
+                    raise
+                err = retry_err
+        _LOGGER.info("%s timed out; waking the robot and retrying", command)
+        if not await self.wake():
+            raise NarwalCommandError(f"{command}: the robot did not wake up", timeout=True) from err
+        return await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+
+    def pushing_recently(self, window: float = 15.0) -> bool:
+        """True if a status broadcast arrived in the last ``window`` seconds."""
+        return time.time() - self.last_push_time < window
+
+    async def reset_connection(self) -> None:
+        """Throw away the MQTT client and all request state; connect afresh.
+
+        Equivalent to reloading the integration, which is what recovered a
+        connection that kept receiving broadcasts but no replies.
+        """
+        if self._reset_lock is None:
+            self._reset_lock = asyncio.Lock()
+        async with self._reset_lock:
+            if time.monotonic() - self.last_reset_time < 10:
+                return  # another caller just did it
+            await self.disconnect()
+            for event, _holder in list(self._pending_responses.values()):
+                event.set()  # release anyone still waiting on the old client
+            self._pending_responses.clear()
+            self._pending_by_topic.clear()
+            self._pending_subacks.clear()
+            self._sub_topics.clear()
+            self._subscribed.clear()
+            self._command_locks.clear()
+            await self.connect()
+            self.last_reset_time = time.monotonic()
+
+    def probably_asleep(self) -> bool:
+        """True if the robot is likely in deep sleep (ignoring commands)."""
+        if self.state.sub_status.startswith("IDLE_STATUS_LOW_POWER"):
+            return True
+        return time.time() - self.last_message_time > ASLEEP_AFTER_SECONDS
+
+    async def wake(self) -> bool:
+        """Wake the robot the way the Narwal app does; True once it answers.
+
+        Sends the app's "entered device page" event, then active_robot_publish
+        as a request, waiting for the reply with growing timeouts
+        (WAKE_TIMEOUTS, ~76 s worst case). Concurrent callers share one wake-up.
+        """
+        if self._wake_lock is None:
+            self._wake_lock = asyncio.Lock()
+        async with self._wake_lock:
+            if time.monotonic() - self.last_wake_time < 5:
+                return True  # another caller just woke it
+            await self._publish_no_response(
+                TOPIC_CMD_NOTIFY_APP_EVENT,
+                encode("NotifyAppEvent_Request", {"appEvent": "APP_EVENT_ENTER_DEVICE_PAGE"}),
+            )
+            started = time.monotonic()
+            for attempt, attempt_timeout in enumerate(WAKE_TIMEOUTS, start=1):
+                try:
+                    await self.send_command(
+                        TOPIC_CMD_ACTIVE_ROBOT, self._active_request(),
+                        timeout=attempt_timeout, check=False, retry=False, wake=False,
+                    )
+                except NarwalCommandError as err:
+                    if not err.timeout:
+                        raise
+                    continue
+                self.last_wake_time = time.monotonic()
+                self.needs_reconnect = False
+                _LOGGER.info(
+                    "Robot answered after %d wake attempt(s) (%.1f s)",
+                    attempt, self.last_wake_time - started,
+                )
+                return True
+            _LOGGER.warning("Robot did not wake up after %.0f s", time.monotonic() - started)
+            # Either it's offline or our connection silently stopped routing;
+            # let the coordinator refresh the token and reconnect.
+            self.needs_reconnect = True
+            return False
+
     def _ensure_subscribed(self, topic: str) -> None:
         with self._sub_lock:
             if topic in self._subscribed:
                 return
             evt = threading.Event()
             rc, mid = self._client.subscribe(topic, qos=1)
-            if rc == 0:
-                self._pending_subacks[mid] = evt
-                evt.wait(timeout=3.0)
-                self._subscribed.add(topic)
+            if rc != 0:
+                _LOGGER.warning("SUBSCRIBE %s not sent (rc=%s)", topic, rc)
+                return
+            self._sub_topics[mid] = topic
+            self._subscribed.add(topic)
+            self._pending_subacks[mid] = evt
+            if not evt.wait(timeout=3.0):
+                self._subscribed.discard(topic)
+                _LOGGER.warning("No SUBACK for %s within 3 s", topic)
 
     def _send_blocking(self, command: str, request: bytes, timeout: float) -> bytes:
         lock = self._command_locks.setdefault(command, threading.Lock())
@@ -345,44 +510,55 @@ class NarwalClient:
             self._ensure_subscribed(response_topic)
             event = threading.Event()
             holder: list[bytes | None] = [None]
-            self._pending_responses[response_topic] = (event, holder)
-            self._client.publish(
-                topic, self._auth_frame() + request, qos=1,
-                properties=self._build_publish_properties(topic),
-            )
+            props = self._build_publish_properties(topic)
+            corr = bytes(props.CorrelationData)
+            self._pending_responses[corr] = (event, holder)
+            self._pending_by_topic[response_topic] = corr
+            self._client.publish(topic, self._auth_frame() + request, qos=PUBLISH_QOS, properties=props)
             if not event.wait(timeout=timeout):
-                self._pending_responses.pop(response_topic, None)
+                self._pending_responses.pop(corr, None)
+                if self._pending_by_topic.get(response_topic) == corr:
+                    del self._pending_by_topic[response_topic]
                 raise NarwalCommandError(f"{command} timed out", timeout=True)
-            return holder[0] or b""
+            if holder[0] is None:  # released by reset_connection(), no reply
+                raise NarwalCommandError(f"{command} interrupted by a reconnect", timeout=True)
+            return holder[0]
 
     async def _publish_no_response(self, command: str, request: bytes) -> None:
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
         topic = f"{self.base_topic}/{command}"
         self._client.publish(
-            topic, self._auth_frame() + request, qos=1,
+            topic, self._auth_frame() + request, qos=PUBLISH_QOS,
             properties=self._build_publish_properties(topic),
         )
 
+    @staticmethod
+    def _active_request() -> bytes:
+        return encode("ActiveRobotPublish_Request", {
+            "topicsDuration": {
+                "workStatusDuration": 2000,
+                "displayMapDuration": 2000,
+                "robotBaseStatusDuration": 2000,
+            },
+            "publishDuration": 60000,
+        })
+
     async def notify_active(self) -> None:
-        """Announce an app client; the robot then pushes status every ~2 s."""
+        """Keepalive: re-register as an app client (no reply awaited).
+
+        Keeps an awake robot pushing status every ~2 s. It does NOT wake a
+        sleeping robot; use wake() for that.
+        """
         try:
-            request = encode("ActiveRobotPublish_Request", {
-                "topicsDuration": {
-                    "workStatusDuration": 2000,
-                    "displayMapDuration": 2000,
-                    "robotBaseStatusDuration": 2000,
-                },
-                "publishDuration": 60000,
-            })
-            await self._publish_no_response(TOPIC_CMD_ACTIVE_ROBOT, request)
+            await self._publish_no_response(TOPIC_CMD_ACTIVE_ROBOT, self._active_request())
         except Exception:  # noqa: BLE001 - best effort keepalive
             _LOGGER.debug("active_robot_publish failed", exc_info=True)
 
     # ---- status / info -------------------------------------------------
 
     async def request_status_update(self) -> None:
-        resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS, retry=False)
+        resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS, retry=False, wake=False)
         base = resp.message.get("robotBaseStatus")
         if isinstance(base, dict):
             self.state.update_base_status(base)
@@ -390,7 +566,7 @@ class NarwalClient:
             self._notify_state_update()
 
     async def fetch_config(self) -> dict[str, Any]:
-        resp = await self.send_command(TOPIC_CMD_GET_CONFIG)
+        resp = await self.send_command(TOPIC_CMD_GET_CONFIG, retry=False, wake=False)
         config = resp.message.get("config")
         if isinstance(config, dict):
             self.state.config = config
@@ -398,7 +574,7 @@ class NarwalClient:
         return self.state.config
 
     async def fetch_consumables(self) -> dict[str, list[str]]:
-        resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE, check=False)
+        resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE, check=False, retry=False, wake=False)
         info = resp.message.get("consumableInfo") or {}
         self.state.consumables_due = {
             "maintain": [i for i in info.get("maintainItems", []) if isinstance(i, str)],
@@ -410,22 +586,22 @@ class NarwalClient:
     async def fetch_device_info(self) -> None:
         """Feature flags and firmware version (static; fetch once)."""
         try:
-            resp = await self.send_command(TOPIC_CMD_GET_FEATURE_LIST, check=False)
+            resp = await self.send_command(TOPIC_CMD_GET_FEATURE_LIST, check=False, retry=False, wake=False)
             self.state.features = {k: v for k, v in resp.message.items() if not k.startswith("#")}
         except NarwalCommandError:
             _LOGGER.debug("get_feature_list failed")
         try:
-            resp = await self.send_command(TOPIC_CMD_GET_FIRMWARE_VERSION, check=False)
+            resp = await self.send_command(TOPIC_CMD_GET_FIRMWARE_VERSION, check=False, retry=False, wake=False)
             text = resp.message.get("firmwareVersionText")
             if not text:
-                resp = await self.send_command(TOPIC_CMD_GET_DEVICE_INFO, check=False, response_type="")
+                resp = await self.send_command(TOPIC_CMD_GET_DEVICE_INFO, check=False, response_type="", retry=False, wake=False)
                 text = _device_info_version(resp.raw)
             self.state.firmware_version = (text or "").strip()
         except NarwalCommandError:
             _LOGGER.debug("firmware version query failed")
 
-    async def get_map(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=20.0)
+    async def get_map(self, wake: bool = False) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=20.0, retry=wake, wake=wake)
 
     async def fetch_map(self) -> MapSnapshot | None:
         """Fetch the static map; updates rooms and map geometry in state."""
@@ -576,9 +752,12 @@ class NarwalClient:
                 },
                 "order": order,
             })
-        task: dict[str, Any] = {"items": items, "taskType": "TASK_TYPE_CUSTOM_CLEAN"}
-        if self.state.map and self.state.map.map_id:
-            task["mapId"] = self.state.map.map_id
+        task: dict[str, Any] = {"items": items, "taskType": CLEAN_MODE_TASK_TYPE[mode]}
+        # The robot rejects a clean task without a map id (seen live). Prefer
+        # the loaded map's id, else the one the robot reports in its status.
+        map_id = self.state.current_map_id
+        if map_id:
+            task["mapId"] = map_id
         return encode("StartClean_Request", {"task": task})
 
     async def start_clean(
@@ -590,10 +769,13 @@ class NarwalClient:
         passes: int = 1,
     ) -> CommandResponse:
         """Start cleaning the given rooms (all known rooms if none given)."""
-        await self.notify_active()
+        if self.probably_asleep():
+            await self.wake()
+        if self.state.map is None or not self.state.rooms:
+            # Map not loaded yet (e.g. the robot was asleep at startup): load it
+            # now that the robot is awake, for room ids and the map id.
+            await self.fetch_rooms()
         if not room_ids:
-            if not self.state.rooms or self.state.map is None:
-                await self.fetch_rooms()
             room_ids = [
                 r.room_id for r in self.state.rooms
                 if r.room_id not in self.state.no_go_room_ids

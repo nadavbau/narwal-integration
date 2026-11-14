@@ -64,7 +64,7 @@ async def test_start_skips_no_go_rooms(hass: HomeAssistant, setup, robot) -> Non
     assert [i["zone"]["zoneId"] for i in items] == [1, 2]
     assert items[0]["param"]["mode"] == "CLEAN_MODE_SWEEP_MOP_SYNC"
     assert items[0]["param"]["sweepMopSyncTime"] == 1
-    assert req["task"]["taskType"] == "TASK_TYPE_CUSTOM_CLEAN"
+    assert req["task"]["taskType"] == "TASK_TYPE_GENERAL_SWEEP_MOP_SYNC"  # what the app sends
 
 
 async def test_fan_speed_while_docked_applies_to_next_clean(hass: HomeAssistant, setup, robot) -> None:
@@ -91,7 +91,9 @@ async def test_clean_rooms_command(hass: HomeAssistant, setup, robot) -> None:
                     "mop_humidity": "wet", "passes": 2}},
         blocking=True,
     )
-    item = decode("StartClean_Request", robot.requests("clean/start_clean")[-1])["task"]["items"][0]
+    task = decode("StartClean_Request", robot.requests("clean/start_clean")[-1])["task"]
+    assert task["taskType"] == "TASK_TYPE_GENERAL_SWEEP_THEN_MOP"
+    item = task["items"][0]
     assert item["zone"] == {"zoneType": "ZONE_TYPE_ROOM", "zoneId": 2}
     assert item["param"] == {
         "mode": "CLEAN_MODE_SWEEP_THEN_MOP", "fanLevel": "FAN_LEVEL_STRONG",
@@ -207,3 +209,36 @@ async def test_map_camera(hass: HomeAssistant, setup) -> None:
 async def test_unload(hass: HomeAssistant, setup, config_entry) -> None:
     assert await hass.config_entries.async_unload(config_entry.entry_id)
     assert config_entry.state is ConfigEntryState.NOT_LOADED
+
+
+async def test_codes_the_app_hides_are_not_errors(hass: HomeAssistant, setup) -> None:
+    """Seen live: 0x01010072 (level 1) is reported but not in the app's table."""
+    idle_with_notice = {
+        "batteryPercentage": 100.0,
+        "robotTaskStatus": {"task": "TASK_TYPE_IDLE", "idleStatus": "IDLE_STATUS_IN_STATION"},
+        "stationContactType": "STATION_CONTACT_TYPE_CONTACTED",
+        "errorCode": [{"identityCode": 0x01010072, "level": 1}],
+    }
+    push(hass, setup.client, "status/robot_base_status", "RobotBaseStatus", idle_with_notice)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(VACUUM).state == VacuumActivity.DOCKED
+    assert hass.states.get(_eid(hass, "binary_sensor", "problem")).state == "off"
+    error = hass.states.get(_eid(hass, "sensor", "error"))
+    assert error.state == "No error"
+    assert error.attributes["hidden_codes"] == ["0x01010072"]
+    assert error.attributes["codes"] == []
+
+
+async def test_clean_includes_map_id_without_loaded_map(hass: HomeAssistant, setup, robot) -> None:
+    """The robot rejects a task without mapId (seen live); fall back to the
+    map id it reports in its status when the map itself isn't loaded."""
+    client = setup.client
+    client.state.map = None
+    robot.answer_map = False  # map fetch fails this time
+    client.state.base["mapId"] = 1
+
+    await client.start_clean([2])
+
+    task = decode("StartClean_Request", robot.requests("clean/start_clean")[-1])["task"]
+    assert task["mapId"] == 1

@@ -13,6 +13,14 @@ MQTT_PORT = 8883
 
 COMMAND_RESPONSE_TIMEOUT = 10.0
 
+# Waking a robot from deep sleep, as the official app does: send
+# active_robot_publish as a request and wait for its reply, with these
+# per-attempt timeouts (seconds), until the robot answers (~76 s in total).
+WAKE_TIMEOUTS: tuple[float, ...] = (1, 1, 2, 2, 4, 4, 8, 8, 16, 30)
+# No message from the robot for this long means it has probably gone to sleep
+# (while awake and registered it pushes status every ~2 s).
+ASLEEP_AFTER_SECONDS = 120
+
 # --- Command topics (client -> robot) ---
 TOPIC_CMD_YELL = "common/yell"
 TOPIC_CMD_REBOOT = "common/reboot"
@@ -109,6 +117,17 @@ CLEAN_MODE_LABEL: dict[CleanMode, str] = {
     CleanMode.MOP_ONLY: "CLEAN_MODE_MOP",
     CleanMode.VACUUM_AND_MOP: "CLEAN_MODE_SWEEP_MOP_SYNC",
     CleanMode.VACUUM_THEN_MOP: "CLEAN_MODE_SWEEP_THEN_MOP",
+}
+
+# CleanTask.taskType the Narwal app sends for a room clean where every room
+# uses the same mode (it sends TASK_TYPE_CUSTOM_CLEAN only when rooms have
+# individual settings). Decides how the robot and the app's history name
+# the task ("Vacuum then mop" vs "Custom clean").
+CLEAN_MODE_TASK_TYPE: dict[CleanMode, str] = {
+    CleanMode.VACUUM_ONLY: "TASK_TYPE_GENERAL_SWEEP",
+    CleanMode.MOP_ONLY: "TASK_TYPE_GENERAL_MOP",
+    CleanMode.VACUUM_AND_MOP: "TASK_TYPE_GENERAL_SWEEP_MOP_SYNC",
+    CleanMode.VACUUM_THEN_MOP: "TASK_TYPE_GENERAL_SWEEP_THEN_MOP",
 }
 
 # ServiceResult labels that mean the command was accepted.

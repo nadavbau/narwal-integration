@@ -194,7 +194,7 @@ v01.09.01.00).
 
 | Topic | Request → Response | Notes |
 |-------|--------------------|-------|
-| `common/active_robot_publish` | `ActiveRobotPublish_Request` (no reply) | Registers an app client; robot pushes status every `topicsDuration` ms for `publishDuration` ms. Re-send every ~50 s. Live |
+| `common/active_robot_publish` | `ActiveRobotPublish_Request` → `ActiveRobotPublish_Response` | Registers an app client; robot pushes status every `topicsDuration` ms for `publishDuration` ms. Keepalive: re-send every ~50 s without waiting. Waking: send as a request and wait for the reply (see *Deep sleep and waking*). Live |
 | `status/get_device_base_status` | — → `GetDeviceBaseStatus_Response` | `{result: RESULT_TYPE_SUCCESS, robotBaseStatus}`. Live |
 | `common/get_feature_list` | — → `GetFeatureList_Response` | Feature flags. Live |
 | `common/upgrade/get_firmware_version` | — → `GetFirmwareVersion_Response` | `firmwareVersionText`. `common/get_device_info` field 3 also holds it |
@@ -210,6 +210,7 @@ v01.09.01.00).
 | `supply/recall` | empty | Return to dock. Live |
 | `supply/dry_mop`, `supply/wash_and_dry_mop`, `supply/dust_gathering` | empty | Live |
 | `supply/wash_mop` | empty | Rejected while idle on the dock (mid-clean wash) |
+| `common/notify_app_event` | `NotifyAppEvent_Request` | `appEvent`: `APP_EVENT_START`, `APP_EVENT_ENTER_DEVICE_PAGE`; sent by the app before waking the robot |
 | `common/yell` | empty | Locate. Live |
 
 Most responses carry `result` (enum `ServiceResult`) in field 1:
@@ -220,14 +221,56 @@ Most responses carry `result` (enum `ServiceResult`) in field 1:
 … (`const.py` → `SERVICE_RESULT_MESSAGES` has readable text). Read-only
 commands may omit `result`.
 
-### Deep sleep and timeouts
+### Deep sleep and waking
 
-The robot keeps its MQTT connection while in deep sleep but ignores
-commands: publishes succeed, no reply arrives. Re-sending
-`active_robot_publish` wakes it; the client retries a timed-out command once
-after that. Repeated timeouts are not a token problem — but the broker can
-also silently stop routing when the JWT nears expiry, so after 3 consecutive
-failures the coordinator refreshes the token and reconnects.
+After a while idle on the dock the robot reports
+`IDLE_STATUS_LOW_POWER_IN_STATION` and goes into deep sleep. It keeps its MQTT
+connection but ignores commands: publishes succeed, no reply arrives. It
+still wakes on its own for short charging top-ups (every ~2.5 h observed).
+
+A fire-and-forget `active_robot_publish` (the keepalive) does **not** wake
+it. The app wakes it with `HeartbeatOrchestrator`: it sends
+`common/notify_app_event` (`APP_EVENT_ENTER_DEVICE_PAGE`), then
+`active_robot_publish` **as a request**, waiting for the
+`ActiveRobotPublish_Response` with per-attempt timeouts of
+1, 1, 2, 2, 4, 4, 8, 8, 16, 30 s (~76 s worst case), and only sends commands
+once the robot has answered. The client does the same (`NarwalClient.wake()`):
+before a user command when the robot looks asleep (it reported low power, or
+nothing has arrived for 2 min), and once more after a command times out.
+Background reads (status polls, settings, map) never wake it.
+
+Repeated poll timeouts from a robot that reported going to sleep are
+expected and don't trigger reconnects. The broker can still silently stop
+routing near JWT expiry, so the coordinator refreshes the token and
+reconnects after 3 unexplained poll failures, on token expiry, or when a
+wake-up gets no answer at all.
+
+### Shared replies and correlation
+
+Every client logged in to the account receives every reply: HA sees the
+replies to the app's requests (and vice versa), because they all subscribe
+to the same `/response` topics. The robot echoes the request's MQTT5
+`CorrelationData` in its reply, so the client matches replies by it (and
+falls back to the topic only for a reply without one).
+
+### Publish at QoS 0
+
+The broker never sends PUBACK for QoS 1 publishes (seen live: every
+message, answered or not, stays in paho's in-flight queue). paho allows 20
+unacknowledged messages in flight and then silently stops sending, so a
+QoS 1 client goes deaf 10-20 minutes after connecting (keepalives every
+50 s plus polls); broadcasts stop ~1 min later because the keepalive no
+longer goes out. This looked like a robot "dozing off" while drying mops
+and like a connection that stopped receiving replies. Publish every request
+at QoS 0 (`PUBLISH_QOS`); the robot answers QoS 0 requests in ~1-2 s.
+
+### Requests that time out while the robot is broadcasting
+
+As a safety net, on a timeout while broadcasts were arriving the client
+rebuilds the connection (`NarwalClient.reset_connection()`) and resends; if
+there's still no answer, it runs the wake-up and resends once more. Status
+polls only reset, never wake. SUBACK refusals are logged and retried instead
+of being assumed successful.
 
 ## 5. Status and Requests
 
@@ -340,7 +383,9 @@ StartClean_Request
               4 mopHumidity = MopHumidity  (when mopping)
               5 sweepTime / 6 mopTime / 7 sweepMopSyncTime = passes for that phase
           3 order = 1, 2, …
-      5 taskType = TASK_TYPE_CUSTOM_CLEAN
+      5 taskType = TASK_TYPE_GENERAL_SWEEP / _MOP / _SWEEP_MOP_SYNC / _SWEEP_THEN_MOP
+                   (by mode; the app uses TASK_TYPE_CUSTOM_CLEAN only when rooms have
+                   individual settings, and the robot then reports "Custom clean")
 ```
 
 Live-verified. The robot answers
@@ -411,6 +456,10 @@ client is registered. Same units as §6.2.
 - `ErrorCode.identityCode` → message: `error_codes.py` (229 codes for this
   model from the app's own table; the app's product key `EHf6cRNRGT` is the
   **J4** platform internally).
+- The robot also reports codes the app has no message for and doesn't show
+  (seen live: `0x01010072`, level 1, mid-clean with every tank and module
+  normal). Only codes in the table count as errors; the rest are exposed as
+  `hidden_codes` on the Error sensor for diagnostics.
 - Consumables: `GetConsumableInfo_Response.consumableInfo` lists items **due**:
   `maintainItems` (`ConsumableMaintainItem`: DUST_BOX, DUST_FILTER,
   WASH_RIBS, UNIVERSAL_WHEEL, CLIFF_SENSOR, …) and `replaceItems`

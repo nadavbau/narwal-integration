@@ -18,6 +18,12 @@ MESSAGES: dict[str, dict[int, tuple[str, str, str | None, bool]]] = {
         3: ('enableDebugMessage', 'bool', None, False),
         4: ('appFeatureList', 'message', 'ActiveRobotPublish_AppFeatureList', False),
     },
+    'ActiveRobotPublish_Response': {
+        1: ('topicsDuration', 'message', 'ActiveRobotPublish_TopicDuration', False),
+        2: ('publishDuration', 'uint32', None, False),
+        3: ('firmwareVersion', 'string', None, False),
+        4: ('unifiedErrorCode', 'uint32', None, False),
+    },
     'ActiveRobotPublish_TopicDuration': {
         1: ('workStatusDuration', 'uint32', None, False),
         2: ('displayMapDuration', 'uint32', None, False),
@@ -417,6 +423,13 @@ MESSAGES: dict[str, dict[int, tuple[str, str, str | None, bool]]] = {
         1: ('id', 'uint32', None, False),
         2: ('polygon', 'message', 'Grid', True),
     },
+    'NotifyAppEvent_Request': {
+        1: ('appEvent', 'enum', 'NotifyAppEvent_Request_AppEvent', False),
+    },
+    'NotifyAppEvent_Response': {
+        1: ('result', 'enum', 'ServiceResult', False),
+        2: ('unifiedErrorCode', 'uint32', None, False),
+    },
     'OTAUpgradeStatus': {
         1: ('type', 'int32', None, False),
         2: ('status', 'int32', None, False),
@@ -795,6 +808,7 @@ ENUMS: dict[str, dict[int, str]] = {
     'MissionTriggerType': {0: 'MISSION_TRIGGER_TYPE_UNSPECIFIED', 1: 'MISSION_TRIGGER_TYPE_APP', 2: 'MISSION_TRIGGER_TYPE_STATION', 3: 'MISSION_TRIGGER_TYPE_ROBOT', 4: 'MISSION_TRIGGER_TYPE_SCHEDULE', 5: 'MISSION_TRIGGER_TYPE_SYSTEM', 6: 'MISSION_TRIGGER_TYPE_SPEECH', 7: 'MISSION_TRIGGER_TYPE_HW_CENTRAL_SCREEN', 8: 'MISSION_TRIGGER_TYPE_HW_H5', 9: 'MISSION_TRIGGER_TYPE_LLM', 10: 'MISSION_TRIGGER_TYPE_AIOT', 11: 'MISSION_TRIGGER_TYPE_MATTER'},
     'MopHumidity': {0: 'MOP_HUMIDITY_UNSPECIFIED', 1: 'MOP_HUMIDITY_DRY', 2: 'MOP_HUMIDITY_NORMAL', 3: 'MOP_HUMIDITY_WET'},
     'MopStrengthLevel': {0: 'MOP_STRENGTH_LEVEL_UNSPECIFIED', 1: 'MOP_STRENGTH_LEVEL_NORMAL', 2: 'MOP_STRENGTH_LEVEL_HIGH'},
+    'NotifyAppEvent_Request_AppEvent': {0: 'APP_EVENT_UNSPECIFIED', 1: 'APP_EVENT_START', 2: 'APP_EVENT_ENTER_DEVICE_PAGE', 3: 'APP_EVENT_VIDEO_ACTIVATED'},
     'OverlapLevel': {0: 'OVERLAP_LEVEL_UNSPECIFIED', 1: 'OVERLAP_LEVEL_NORMAL', 2: 'OVERLAP_LEVEL_DENSE'},
     'ParallelTaskType': {0: 'PARALLEL_TASK_TYPE_UNSPECIFIED', 1: 'PARALLEL_TASK_TYPE_DRY_STATION_BAG', 2: 'PARALLEL_TASK_TYPE_STATION_BAG_STERILIZATION', 3: 'PARALLEL_TASK_TYPE_DRY_MOP', 4: 'PARALLEL_TASK_TYPE_WASH_MOP', 5: 'PARALLEL_TASK_TYPE_DRY_BAG', 6: 'PARALLEL_TASK_TYPE_CLEAN_TASK', 7: 'PARALLEL_TASK_TYPE_VIDEO_CRUISE'},
     'PetIconType': {0: 'PET_ICON_TYPE_UNSPECIFIED', 1: 'PET_ICON_TYPE_CAT', 2: 'PET_ICON_TYPE_DOG', 3: 'PET_ICON_TYPE_CAT_AND_DOG'},
