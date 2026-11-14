@@ -230,8 +230,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     # ------------------------------------------------------------------
 
     def _on_state_update(self, state: NarwalState) -> None:
-        """Push from MQTT (runs on the event loop)."""
-        self._consecutive_failures = 0
+        """Push from MQTT (runs on the event loop).
+
+        Does not reset ``_consecutive_failures``: pushes prove the subscribe
+        side works, not that our publishes reach the robot. Only a successful
+        poll clears it, so the 3-failure reconnect still fires on a chatty
+        robot whose commands all time out.
+        """
         activity = state.activity
         if self._last_activity == ACTIVITY_CLEANING and activity in (ACTIVITY_DOCKED, ACTIVITY_IDLE):
             # A task just finished: the map may have changed, and
