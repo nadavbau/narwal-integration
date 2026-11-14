@@ -85,6 +85,14 @@ def _error_attrs(state: NarwalState) -> dict[str, Any]:
     }
 
 
+def _dust_bag_health(state: NarwalState) -> int | None:
+    """Station dust bag health, 0-100 % (only reported by bag-equipped bases)."""
+    value = state.base.get("stationBagHealthScore")
+    if not isinstance(value, (int, float)):
+        return None
+    return round(max(0.0, min(100.0, float(value))))
+
+
 def _consumable_attrs(state: NarwalState) -> dict[str, Any]:
     due = state.consumables_due
     items = due.get("maintain", []) + due.get("replace", [])
@@ -168,6 +176,17 @@ SENSORS: tuple[NarwalSensorDescription, ...] = (
                "DUST_BOX_STATE_", "mdi:delete-variant"),
     _base_enum("detergent", "detergentState", "RobotBaseStatus_DetergentState",
                "DETERGENT_STATE_", "mdi:bottle-tonic-outline"),
+    _base_enum("dust_bag", "stationBagStatus", "RobotBaseStatus_StationBagStatus",
+               "STATION_BAG_STATUS_", "mdi:sack"),
+    NarwalSensorDescription(
+        key="dust_bag_health",
+        translation_key="dust_bag_health",
+        icon="mdi:sack-percent",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_dust_bag_health,
+    ),
 )
 
 

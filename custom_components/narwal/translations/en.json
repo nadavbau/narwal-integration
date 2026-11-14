@@ -106,6 +106,18 @@
           "running_out": "Running low",
           "not_using": "Not in use"
         }
+      },
+      "dust_bag": {
+        "name": "Dust bag",
+        "state": {
+          "installed": "Installed",
+          "uninstalled": "Not installed",
+          "suggest_replace": "Replace soon",
+          "abnormal": "Abnormal"
+        }
+      },
+      "dust_bag_health": {
+        "name": "Dust bag health"
       }
     },
     "binary_sensor": {
