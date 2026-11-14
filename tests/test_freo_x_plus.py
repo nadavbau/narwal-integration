@@ -75,3 +75,15 @@ def test_ultra_fault_follows_the_robot() -> None:
     assert state.activity == ACTIVITY_PAUSED  # unchanged upstream behaviour
     state.update_base_status({"robotTaskStatus": PAUSED_SWEEP})
     assert state.error_codes == []
+
+
+def test_x_plus_has_no_station_entities() -> None:
+    from custom_components.narwal.entity import entity_supported
+
+    def coordinator(key: str) -> MagicMock:
+        return MagicMock(client=_client(key))
+
+    for key in ("auto_empty", "wash_mop", "clean_water_tank", "detergent", "mop_wash_frequency"):
+        assert not entity_supported(coordinator(PRODUCT_KEY_FREO_X_PLUS), key)
+        assert entity_supported(coordinator(PRODUCT_KEY_FREO_X_ULTRA), key)
+    assert entity_supported(coordinator(PRODUCT_KEY_FREO_X_PLUS), "dust_bin")  # the robot's own bin

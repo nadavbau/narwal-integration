@@ -9,10 +9,15 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, UNSUPPORTED_ENTITY_KEYS
 from .coordinator import NarwalCoordinator
 from .narwal_client import NarwalCommandError, NarwalConnectionError, NarwalState
 from .narwal_client.const import MODEL_NAMES
+
+
+def entity_supported(coordinator: NarwalCoordinator, key: str) -> bool:
+    """Whether this robot model has the feature behind entity ``key``."""
+    return key not in UNSUPPORTED_ENTITY_KEYS.get(coordinator.client.product_key, frozenset())
 
 
 class NarwalEntity(CoordinatorEntity[NarwalCoordinator]):
