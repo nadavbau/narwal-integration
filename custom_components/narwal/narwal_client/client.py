@@ -61,6 +61,13 @@ from .proto import ProtoError, decode, encode, encode_varint
 
 _LOGGER = logging.getLogger(__name__)
 
+# Narwal's broker never PUBACKs our QoS 1 publishes (seen live: every message,
+# answered or not, stays in paho's in-flight queue). After paho's in-flight
+# limit (20) the client silently stops sending, so commands and keepalives
+# never leave and HA goes deaf 10-20 minutes after connecting. Publish at QoS
+# 0; the robot answers just the same and our reply timeouts cover losses.
+PUBLISH_QOS = 0
+
 # Response message type for each command we decode.
 RESPONSE_TYPES: dict[str, str] = {
     TOPIC_CMD_ACTIVE_ROBOT: "ActiveRobotPublish_Response",
@@ -507,7 +514,7 @@ class NarwalClient:
             corr = bytes(props.CorrelationData)
             self._pending_responses[corr] = (event, holder)
             self._pending_by_topic[response_topic] = corr
-            self._client.publish(topic, self._auth_frame() + request, qos=1, properties=props)
+            self._client.publish(topic, self._auth_frame() + request, qos=PUBLISH_QOS, properties=props)
             if not event.wait(timeout=timeout):
                 self._pending_responses.pop(corr, None)
                 if self._pending_by_topic.get(response_topic) == corr:
@@ -522,7 +529,7 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected")
         topic = f"{self.base_topic}/{command}"
         self._client.publish(
-            topic, self._auth_frame() + request, qos=1,
+            topic, self._auth_frame() + request, qos=PUBLISH_QOS,
             properties=self._build_publish_properties(topic),
         )
 

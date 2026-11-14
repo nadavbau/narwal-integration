@@ -253,17 +253,24 @@ to the same `/response` topics. The robot echoes the request's MQTT5
 `CorrelationData` in its reply, so the client matches replies by it (and
 falls back to the topic only for a reply without one).
 
+### Publish at QoS 0
+
+The broker never sends PUBACK for QoS 1 publishes (seen live: every
+message, answered or not, stays in paho's in-flight queue). paho allows 20
+unacknowledged messages in flight and then silently stops sending, so a
+QoS 1 client goes deaf 10-20 minutes after connecting (keepalives every
+50 s plus polls); broadcasts stop ~1 min later because the keepalive no
+longer goes out. This looked like a robot "dozing off" while drying mops
+and like a connection that stopped receiving replies. Publish every request
+at QoS 0 (`PUBLISH_QOS`); the robot answers QoS 0 requests in ~1-2 s.
+
 ### Requests that time out while the robot is broadcasting
 
-Seen live: a few minutes into drying the mops, the robot stopped answering
-requests, kept broadcasting status for ~1 min, then went quiet (status stays
-"Mop care: dry") — it dozes off. Separately, HA's long-lived connection once
-kept missing replies during an active clean until the integration was
-reloaded. The client handles both the same way: on a timeout while
-broadcasts were arriving, rebuild the connection
-(`NarwalClient.reset_connection()`) and resend; if there's still no answer,
-run the wake-up and resend once more. Status polls only reset, never wake.
-SUBACK refusals are logged and retried instead of being assumed successful.
+As a safety net, on a timeout while broadcasts were arriving the client
+rebuilds the connection (`NarwalClient.reset_connection()`) and resends; if
+there's still no answer, it runs the wake-up and resends once more. Status
+polls only reset, never wake. SUBACK refusals are logged and retried instead
+of being assumed successful.
 
 ## 5. Status and Requests
 
