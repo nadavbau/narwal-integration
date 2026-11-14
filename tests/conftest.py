@@ -7,6 +7,7 @@ commands with protobuf messages built from the same schema the app uses.
 
 from __future__ import annotations
 
+import time
 import zlib
 from types import SimpleNamespace
 from typing import Any
@@ -72,12 +73,32 @@ class FakeRobot:
             "carpetCleanOption": "CARPET_CLEAN_OPTION_IGNORE",
         }
         self.reject: set[str] = set()
+        # Deep sleep: commands time out until this many active_robot_publish
+        # requests have arrived (None = awake; float("inf") = never wakes).
+        self.sleep_until_wake_requests: float | None = None
+        self.wake_requests = 0
 
     def requests(self, command: str) -> list[bytes]:
         return [req for cmd, req in self.calls if cmd == command]
 
+    @property
+    def asleep(self) -> bool:
+        return self.sleep_until_wake_requests is not None
+
     def answer(self, command: str, request: bytes) -> bytes:
+        from custom_components.narwal.narwal_client.client import NarwalCommandError
+
         self.calls.append((command, request))
+        if command == "common/active_robot_publish" and self.asleep:
+            self.wake_requests += 1
+            if self.wake_requests >= self.sleep_until_wake_requests:
+                self.sleep_until_wake_requests = None  # woke up
+            else:
+                raise NarwalCommandError(f"{command} timed out", timeout=True)
+        elif self.asleep:
+            raise NarwalCommandError(f"{command} timed out", timeout=True)
+        if command == "common/active_robot_publish":
+            return frame(encode("ActiveRobotPublish_Response", {"publishDuration": 60000}))
         ok = {"result": "SERVICE_RESULT_PERFORM_SUCCESS"}
         if command in self.reject:
             return frame(encode("SetFanLevel_Response", {"result": "SERVICE_RESULT_PERFORM_GENERAL_FAILED"}))
@@ -163,7 +184,9 @@ def mock_robot(robot: FakeRobot):
         self.state.device_reachable = True
 
     def fake_send_blocking(self: NarwalClient, command: str, request: bytes, timeout: float) -> bytes:
-        return robot.answer(command, request)
+        reply = robot.answer(command, request)
+        self.last_message_time = time.time()  # like _on_message for a real reply
+        return reply
 
     async def fake_publish(self: NarwalClient, command: str, request: bytes) -> None:
         robot.calls.append((command, request))

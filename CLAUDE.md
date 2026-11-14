@@ -82,9 +82,9 @@ Request = Narwal frame (`0x01` + varint(len) + `{1: uuid, 2: uuid}`) + encoded r
 - `clean/set_fan_level` / `clean/set_mop_humidity` are only accepted during a clean; while docked, store the choice and send it in the next task. Fan levels: 1 quiet … 3 strong, 5 max (0 = unspecified).
 - Settings: `config/get` / `config/set` share field names but NOT numbers (e.g. `disturbMode` is 4 in Get, 5 in Set). Explicit `false` must be sent to turn a setting off.
 
-### Deep sleep and token expiry
+### Deep sleep, waking and token expiry
 
-The vacuum keeps its MQTT connection in deep sleep but ignores commands (publish succeeds, no reply). Re-send `active_robot_publish` to wake it; the client retries a timed-out command once. Separately, the broker may stop routing near JWT expiry: after 3 consecutive failures, refresh the token and reconnect.
+The vacuum goes into deep sleep after a while idle (`IDLE_STATUS_LOW_POWER_IN_STATION`): it keeps its MQTT connection but ignores commands. The fire-and-forget keepalive (`notify_active`) does NOT wake it. Wake it like the app: `notify_app_event` (`APP_EVENT_ENTER_DEVICE_PAGE`), then `active_robot_publish` as a request, waiting for the reply with timeouts 1, 1, 2, 2, 4, 4, 8, 8, 16, 30 s, and only then send the command — that's `NarwalClient.wake()`, which `send_command` runs when the robot looks asleep and after a timeout. Background reads (polls, config, map) pass `wake=False, retry=False` and must never wake it. Poll timeouts while the robot reported sleeping are expected; separately the broker may stop routing near JWT expiry, so reconnect after 3 unexplained poll failures, on token expiry, or when a wake-up gets no answer.
 
 ### Explicit subscriptions only
 
@@ -126,7 +126,7 @@ All MQTT and SSL operations must run in executors. HA detects blocking calls (`s
 
 ### Broadcast registration
 
-The vacuum only sends pushes while an app client is registered via `active_robot_publish` (publish window 60 s). The coordinator re-sends it on its own 50 s timer, independent of the poll interval, and the client re-sends it before retrying a timed-out command (the vacuum may have woken from deep sleep and not know about us).
+The vacuum only sends pushes while an app client is registered via `active_robot_publish` (publish window 60 s). The coordinator re-sends it on its own 50 s timer, independent of the poll interval, That keeps an awake vacuum pushing; it does not wake a sleeping one (see *Deep sleep, waking and token expiry*).
 
 ---
 

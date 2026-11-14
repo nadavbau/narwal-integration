@@ -13,6 +13,14 @@ MQTT_PORT = 8883
 
 COMMAND_RESPONSE_TIMEOUT = 10.0
 
+# Waking a robot from deep sleep, as the official app does: send
+# active_robot_publish as a request and wait for its reply, with these
+# per-attempt timeouts (seconds), until the robot answers (~76 s in total).
+WAKE_TIMEOUTS: tuple[float, ...] = (1, 1, 2, 2, 4, 4, 8, 8, 16, 30)
+# No message from the robot for this long means it has probably gone to sleep
+# (while awake and registered it pushes status every ~2 s).
+ASLEEP_AFTER_SECONDS = 120
+
 # --- Command topics (client -> robot) ---
 TOPIC_CMD_YELL = "common/yell"
 TOPIC_CMD_REBOOT = "common/reboot"
