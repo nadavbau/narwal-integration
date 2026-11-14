@@ -216,9 +216,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         _LOGGER.warning("Refreshing token and reconnecting (failures=%d)", self._consecutive_failures)
         try:
             await self._reauth()
-            if self.client.connected:
-                await self.client.disconnect()
-            await self.client.connect()
+            await self.client.reset_connection()
             self._consecutive_failures = 0
             self.client.needs_reconnect = False
         except Exception:  # noqa: BLE001 - keep the coordinator alive
@@ -274,6 +272,16 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             await self.client.request_status_update()
             self._consecutive_failures = 0
         except NarwalCommandError:
+            if self.client.pushing_recently():
+                # Broadcasts arrive but our request got no reply: the
+                # connection went stale. Rebuild it now rather than after
+                # three more failed polls.
+                _LOGGER.warning("Status poll timed out while the robot is broadcasting; resetting the connection")
+                try:
+                    await self.client.reset_connection()
+                except NarwalConnectionError as err:
+                    _LOGGER.warning("Connection reset failed: %s", err)
+                return self.client.state
             # A robot that reported going to sleep ignores polls; that's
             # expected and not a connection problem, so don't reconnect over it.
             if not self.client.state.sub_status.startswith("IDLE_STATUS_LOW_POWER"):

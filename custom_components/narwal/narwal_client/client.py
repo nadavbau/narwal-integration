@@ -153,7 +153,11 @@ class NarwalClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._pending_responses: dict[str, tuple[threading.Event, list[bytes | None]]] = {}
         self._pending_subacks: dict[int, threading.Event] = {}
+        self._sub_topics: dict[int, str] = {}  # SUBSCRIBE mid -> topic
         self._subscribed: set[str] = set()
+        self._reset_lock: asyncio.Lock | None = None
+        self.last_push_time: float = 0.0
+        self.last_reset_time: float = 0.0
         self._sub_lock = threading.Lock()
         self._command_locks: dict[str, threading.Lock] = {}
         self._wake_lock: asyncio.Lock | None = None
@@ -232,16 +236,30 @@ class NarwalClient:
             return
         _LOGGER.info("MQTT connected (%s)", self.base_topic)
         self._subscribed.clear()
+        self._sub_topics.clear()
         topics = [f"{self.base_topic}/{t}" for t in BROADCAST_TOPICS]
         topics += [f"{self.base_topic}/{t}/response" for t in _PRESUBSCRIBE]
         for topic in topics:
-            client.subscribe(topic, qos=1)
-            self._subscribed.add(topic)
+            rc, mid = client.subscribe(topic, qos=1)
+            if rc == 0:
+                # Optimistic: _on_subscribe removes it again if the broker refuses.
+                self._sub_topics[mid] = topic
+                self._subscribed.add(topic)
+            else:
+                _LOGGER.warning("SUBSCRIBE %s not sent (rc=%s)", topic, rc)
         self._connected.set()
         self.state.device_reachable = True
         self._notify_state_update()
 
     def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        topic = self._sub_topics.pop(mid, None)
+        codes = reason_codes if isinstance(reason_codes, list) else [reason_codes]
+        failed = [c for c in codes if getattr(c, "is_failure", False)]
+        if failed and topic:
+            # Without this subscription the robot's replies never arrive, so
+            # forget it; _ensure_subscribed retries before the next command.
+            self._subscribed.discard(topic)
+            _LOGGER.warning("Broker refused subscription to %s: %s", topic, failed)
         evt = self._pending_subacks.pop(mid, None)
         if evt:
             evt.set()
@@ -277,7 +295,10 @@ class NarwalClient:
         suffix = msg.topic[len(self.base_topic):].lstrip("/")
         msg_type = _PUSH_TYPES.get(suffix)
         if not msg_type:
+            if msg.topic.endswith("/response"):
+                _LOGGER.debug("Late or unmatched reply on %s", suffix)
             return
+        self.last_push_time = time.time()
         try:
             data = decode(msg_type, strip_narwal_frame(msg.payload))
         except ProtoError:
@@ -331,6 +352,19 @@ class NarwalClient:
         except NarwalCommandError as err:
             if not (retry and err.timeout):
                 raise
+            if self.pushing_recently():
+                # The robot is awake and its broadcasts reach us, but its reply
+                # didn't: our connection has gone stale. Rebuild it and resend.
+                _LOGGER.warning(
+                    "%s timed out while the robot is broadcasting; resetting the connection", command,
+                )
+                await self.reset_connection()
+                raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+                resp = CommandResponse.parse(command, raw, rtype)
+                if check and not resp.success:
+                    reason = SERVICE_RESULT_MESSAGES.get(str(resp.result), str(resp.result))
+                    raise NarwalCommandError(f"{command}: {reason}", result=resp.result) from err
+                return resp
             _LOGGER.info("%s timed out; waking the robot and retrying", command)
             if not await self.wake():
                 raise NarwalCommandError(
@@ -343,6 +377,32 @@ class NarwalClient:
             reason = SERVICE_RESULT_MESSAGES.get(str(resp.result), str(resp.result))
             raise NarwalCommandError(f"{command}: {reason}", result=resp.result)
         return resp
+
+    def pushing_recently(self, window: float = 15.0) -> bool:
+        """True if a status broadcast arrived in the last ``window`` seconds."""
+        return time.time() - self.last_push_time < window
+
+    async def reset_connection(self) -> None:
+        """Throw away the MQTT client and all request state; connect afresh.
+
+        Equivalent to reloading the integration, which is what recovered a
+        connection that kept receiving broadcasts but no replies.
+        """
+        if self._reset_lock is None:
+            self._reset_lock = asyncio.Lock()
+        async with self._reset_lock:
+            if time.monotonic() - self.last_reset_time < 10:
+                return  # another caller just did it
+            await self.disconnect()
+            for event, _holder in list(self._pending_responses.values()):
+                event.set()  # release anyone still waiting on the old client
+            self._pending_responses.clear()
+            self._pending_subacks.clear()
+            self._sub_topics.clear()
+            self._subscribed.clear()
+            self._command_locks.clear()
+            await self.connect()
+            self.last_reset_time = time.monotonic()
 
     def probably_asleep(self) -> bool:
         """True if the robot is likely in deep sleep (ignoring commands)."""
@@ -396,10 +456,15 @@ class NarwalClient:
                 return
             evt = threading.Event()
             rc, mid = self._client.subscribe(topic, qos=1)
-            if rc == 0:
-                self._pending_subacks[mid] = evt
-                evt.wait(timeout=3.0)
-                self._subscribed.add(topic)
+            if rc != 0:
+                _LOGGER.warning("SUBSCRIBE %s not sent (rc=%s)", topic, rc)
+                return
+            self._sub_topics[mid] = topic
+            self._subscribed.add(topic)
+            self._pending_subacks[mid] = evt
+            if not evt.wait(timeout=3.0):
+                self._subscribed.discard(topic)
+                _LOGGER.warning("No SUBACK for %s within 3 s", topic)
 
     def _send_blocking(self, command: str, request: bytes, timeout: float) -> bytes:
         lock = self._command_locks.setdefault(command, threading.Lock())
@@ -417,7 +482,9 @@ class NarwalClient:
             if not event.wait(timeout=timeout):
                 self._pending_responses.pop(response_topic, None)
                 raise NarwalCommandError(f"{command} timed out", timeout=True)
-            return holder[0] or b""
+            if holder[0] is None:  # released by reset_connection(), no reply
+                raise NarwalCommandError(f"{command} interrupted by a reconnect", timeout=True)
+            return holder[0]
 
     async def _publish_no_response(self, command: str, request: bytes) -> None:
         if not self._client or not self.connected:

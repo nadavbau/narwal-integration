@@ -93,3 +93,42 @@ async def test_polls_do_not_wake_or_reconnect_while_asleep(hass: HomeAssistant, 
     assert "common/active_robot_publish" not in sent
     assert "common/notify_app_event" not in sent
     assert setup._consecutive_failures == 0  # sleeping isn't a connection problem
+
+
+async def test_stale_connection_is_reset_not_woken(hass: HomeAssistant, setup, robot) -> None:
+    """Robot is broadcasting (awake) but replies stopped reaching us."""
+    robot.stale = True
+    robot.calls.clear()
+    connects_before = robot.connects
+    client = setup.client
+    client.last_message_time = client.last_push_time = time.time()
+
+    await hass.services.async_call("vacuum", "locate", {"entity_id": VACUUM}, blocking=True)
+
+    sent = [cmd for cmd, _ in robot.calls]
+    assert robot.connects == connects_before + 1          # connection rebuilt
+    assert sent.count("common/yell") == 2                 # timed out, then resent
+    assert not [c for c in sent if c == "common/notify_app_event"]  # no sleep wake-up
+
+
+async def test_refused_subscription_is_forgotten(hass: HomeAssistant, setup) -> None:
+    from paho.mqtt.packettypes import PacketTypes
+    from paho.mqtt.reasoncodes import ReasonCode
+
+    client = setup.client
+    topic = f"{client.base_topic}/clean/start_clean/response"
+    client._subscribed.add(topic)
+    client._sub_topics[42] = topic
+    client._on_subscribe(None, None, 42, [ReasonCode(PacketTypes.SUBACK, identifier=0x87)])
+    assert topic not in client._subscribed  # re-subscribed before the next command
+
+
+async def test_stale_connection_is_healed_by_polling(hass: HomeAssistant, setup, robot) -> None:
+    robot.stale = True
+    connects_before = robot.connects
+    setup.client.last_push_time = time.time()
+
+    await setup._async_update_data()
+
+    assert robot.connects == connects_before + 1
+    assert not robot.stale

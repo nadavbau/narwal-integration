@@ -245,6 +245,17 @@ routing near JWT expiry, so the coordinator refreshes the token and
 reconnects after 3 unexplained poll failures, on token expiry, or when a
 wake-up gets no answer at all.
 
+### Stale connections
+
+Seen live: after some hours, a long-lived client kept receiving the robot's
+broadcasts but no replies to its own requests, even after reconnecting the
+MQTT client; a fresh client (or reloading the integration) worked at once.
+The client now treats "request timed out while broadcasts are arriving" as a
+stale connection, not sleep: it rebuilds the connection with all request
+state cleared (`NarwalClient.reset_connection()`) and resends. Status polls
+do the same, and SUBACK refusals are logged and retried instead of being
+assumed successful. The exact trigger is still unknown.
+
 ## 5. Status and Requests
 
 ### 5.1 `RobotBaseStatus` (push `status/robot_base_status`, and inside `GetDeviceBaseStatus_Response`)
