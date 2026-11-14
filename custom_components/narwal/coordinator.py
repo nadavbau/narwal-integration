@@ -220,6 +220,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 await self.client.disconnect()
             await self.client.connect()
             self._consecutive_failures = 0
+            self.client.needs_reconnect = False
         except Exception:  # noqa: BLE001 - keep the coordinator alive
             _LOGGER.error("Reconnect failed", exc_info=True)
             self.client.state.device_reachable = False
@@ -259,6 +260,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if self._cloud and (
             self._cloud.session.is_token_expired
             or self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+            or self.client.needs_reconnect
         ):
             await self._reconnect_with_fresh_token()
 
@@ -272,7 +274,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             await self.client.request_status_update()
             self._consecutive_failures = 0
         except NarwalCommandError:
-            self._consecutive_failures += 1
+            # A robot that reported going to sleep ignores polls; that's
+            # expected and not a connection problem, so don't reconnect over it.
+            if not self.client.state.sub_status.startswith("IDLE_STATUS_LOW_POWER"):
+                self._consecutive_failures += 1
             _LOGGER.debug("Status poll failed (%d)", self._consecutive_failures)
             self._adjust_poll_interval()
             return self.client.state

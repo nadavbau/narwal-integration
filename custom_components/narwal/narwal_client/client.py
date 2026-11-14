@@ -16,6 +16,7 @@ from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 from .const import (
+    ASLEEP_AFTER_SECONDS,
     BROADCAST_TOPICS,
     CLEAN_MODE_LABEL,
     COMMAND_RESPONSE_TIMEOUT,
@@ -23,6 +24,7 @@ from .const import (
     MQTT_PORT,
     SERVICE_RESULT_MESSAGES,
     TOPIC_CMD_ACTIVE_ROBOT,
+    TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_DRY_MOP,
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_FORCE_END,
@@ -48,6 +50,7 @@ from .const import (
     TOPIC_ROBOT_BASE_STATUS,
     TOPIC_UPGRADE_STATUS,
     TOPIC_WORKING_STATUS,
+    WAKE_TIMEOUTS,
     CleanMode,
     FanLevel,
     MopHumidity,
@@ -59,6 +62,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # Response message type for each command we decode.
 RESPONSE_TYPES: dict[str, str] = {
+    TOPIC_CMD_ACTIVE_ROBOT: "ActiveRobotPublish_Response",
+    TOPIC_CMD_NOTIFY_APP_EVENT: "NotifyAppEvent_Response",
     TOPIC_CMD_GET_BASE_STATUS: "GetDeviceBaseStatus_Response",
     TOPIC_CMD_GET_CONFIG: "GetConfig_Response",
     TOPIC_CMD_SET_CONFIG: "SetConfig_Response",
@@ -77,6 +82,7 @@ _GENERIC_RESULT = "SetFanLevel_Response"
 # explicit subscriptions, so pre-subscribing saves a SUBACK round trip per
 # command (previously a fixed 0.5 s sleep on every call).
 _PRESUBSCRIBE = (
+    TOPIC_CMD_ACTIVE_ROBOT, TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_GET_BASE_STATUS, TOPIC_CMD_GET_CONFIG, TOPIC_CMD_SET_CONFIG,
     TOPIC_CMD_GET_CONSUMABLE, TOPIC_CMD_GET_MAP, TOPIC_CMD_YELL, TOPIC_CMD_PAUSE,
     TOPIC_CMD_RESUME, TOPIC_CMD_FORCE_END, TOPIC_CMD_RECALL, TOPIC_CMD_START_CLEAN,
@@ -150,7 +156,10 @@ class NarwalClient:
         self._subscribed: set[str] = set()
         self._sub_lock = threading.Lock()
         self._command_locks: dict[str, threading.Lock] = {}
+        self._wake_lock: asyncio.Lock | None = None
         self.last_message_time: float = 0.0
+        self.last_wake_time: float = 0.0
+        self.needs_reconnect = False
 
     @property
     def base_topic(self) -> str:
@@ -298,26 +307,35 @@ class NarwalClient:
         response_type: str | None = None,
         check: bool = True,
         retry: bool = True,
+        wake: bool = True,
     ) -> CommandResponse:
         """Send ``command`` with an encoded request body; wait for the reply.
 
-        On timeout the robot is usually in deep sleep: re-announce ourselves
-        (which wakes it) and retry once. With ``check`` a non-success
-        ServiceResult raises NarwalCommandError with a readable reason.
+        A robot in deep sleep keeps its MQTT connection but ignores commands.
+        With ``wake`` (user actions), a robot that looks asleep is woken first;
+        with ``retry``, a timed-out command triggers a full wake-up and is sent
+        once more after the robot has answered. Background reads pass
+        ``wake=False, retry=False`` so polling never wakes the robot.
+        With ``check`` a non-success ServiceResult raises NarwalCommandError
+        with a readable reason.
         """
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
         loop = self._loop or asyncio.get_running_loop()
         # response_type=None -> look up / generic ServiceResult; "" -> don't decode.
         rtype = RESPONSE_TYPES.get(command, _GENERIC_RESULT) if response_type is None else response_type
+        if wake and self.probably_asleep():
+            await self.wake()
         try:
             raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
         except NarwalCommandError as err:
             if not (retry and err.timeout):
                 raise
-            _LOGGER.info("%s timed out; waking robot and retrying once", command)
-            await self.notify_active()
-            await asyncio.sleep(1.5)
+            _LOGGER.info("%s timed out; waking the robot and retrying", command)
+            if not await self.wake():
+                raise NarwalCommandError(
+                    f"{command}: the robot did not wake up", timeout=True
+                ) from err
             raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
 
         resp = CommandResponse.parse(command, raw, rtype)
@@ -325,6 +343,52 @@ class NarwalClient:
             reason = SERVICE_RESULT_MESSAGES.get(str(resp.result), str(resp.result))
             raise NarwalCommandError(f"{command}: {reason}", result=resp.result)
         return resp
+
+    def probably_asleep(self) -> bool:
+        """True if the robot is likely in deep sleep (ignoring commands)."""
+        if self.state.sub_status.startswith("IDLE_STATUS_LOW_POWER"):
+            return True
+        return time.time() - self.last_message_time > ASLEEP_AFTER_SECONDS
+
+    async def wake(self) -> bool:
+        """Wake the robot the way the Narwal app does; True once it answers.
+
+        Sends the app's "entered device page" event, then active_robot_publish
+        as a request, waiting for the reply with growing timeouts
+        (WAKE_TIMEOUTS, ~76 s worst case). Concurrent callers share one wake-up.
+        """
+        if self._wake_lock is None:
+            self._wake_lock = asyncio.Lock()
+        async with self._wake_lock:
+            if time.monotonic() - self.last_wake_time < 5:
+                return True  # another caller just woke it
+            await self._publish_no_response(
+                TOPIC_CMD_NOTIFY_APP_EVENT,
+                encode("NotifyAppEvent_Request", {"appEvent": "APP_EVENT_ENTER_DEVICE_PAGE"}),
+            )
+            started = time.monotonic()
+            for attempt, attempt_timeout in enumerate(WAKE_TIMEOUTS, start=1):
+                try:
+                    await self.send_command(
+                        TOPIC_CMD_ACTIVE_ROBOT, self._active_request(),
+                        timeout=attempt_timeout, check=False, retry=False, wake=False,
+                    )
+                except NarwalCommandError as err:
+                    if not err.timeout:
+                        raise
+                    continue
+                self.last_wake_time = time.monotonic()
+                self.needs_reconnect = False
+                _LOGGER.info(
+                    "Robot answered after %d wake attempt(s) (%.1f s)",
+                    attempt, self.last_wake_time - started,
+                )
+                return True
+            _LOGGER.warning("Robot did not wake up after %.0f s", time.monotonic() - started)
+            # Either it's offline or our connection silently stopped routing;
+            # let the coordinator refresh the token and reconnect.
+            self.needs_reconnect = True
+            return False
 
     def _ensure_subscribed(self, topic: str) -> None:
         with self._sub_lock:
@@ -364,25 +428,32 @@ class NarwalClient:
             properties=self._build_publish_properties(topic),
         )
 
+    @staticmethod
+    def _active_request() -> bytes:
+        return encode("ActiveRobotPublish_Request", {
+            "topicsDuration": {
+                "workStatusDuration": 2000,
+                "displayMapDuration": 2000,
+                "robotBaseStatusDuration": 2000,
+            },
+            "publishDuration": 60000,
+        })
+
     async def notify_active(self) -> None:
-        """Announce an app client; the robot then pushes status every ~2 s."""
+        """Keepalive: re-register as an app client (no reply awaited).
+
+        Keeps an awake robot pushing status every ~2 s. It does NOT wake a
+        sleeping robot; use wake() for that.
+        """
         try:
-            request = encode("ActiveRobotPublish_Request", {
-                "topicsDuration": {
-                    "workStatusDuration": 2000,
-                    "displayMapDuration": 2000,
-                    "robotBaseStatusDuration": 2000,
-                },
-                "publishDuration": 60000,
-            })
-            await self._publish_no_response(TOPIC_CMD_ACTIVE_ROBOT, request)
+            await self._publish_no_response(TOPIC_CMD_ACTIVE_ROBOT, self._active_request())
         except Exception:  # noqa: BLE001 - best effort keepalive
             _LOGGER.debug("active_robot_publish failed", exc_info=True)
 
     # ---- status / info -------------------------------------------------
 
     async def request_status_update(self) -> None:
-        resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS, retry=False)
+        resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS, retry=False, wake=False)
         base = resp.message.get("robotBaseStatus")
         if isinstance(base, dict):
             self.state.update_base_status(base)
@@ -390,7 +461,7 @@ class NarwalClient:
             self._notify_state_update()
 
     async def fetch_config(self) -> dict[str, Any]:
-        resp = await self.send_command(TOPIC_CMD_GET_CONFIG)
+        resp = await self.send_command(TOPIC_CMD_GET_CONFIG, retry=False, wake=False)
         config = resp.message.get("config")
         if isinstance(config, dict):
             self.state.config = config
@@ -398,7 +469,7 @@ class NarwalClient:
         return self.state.config
 
     async def fetch_consumables(self) -> dict[str, list[str]]:
-        resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE, check=False)
+        resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE, check=False, retry=False, wake=False)
         info = resp.message.get("consumableInfo") or {}
         self.state.consumables_due = {
             "maintain": [i for i in info.get("maintainItems", []) if isinstance(i, str)],
@@ -410,22 +481,22 @@ class NarwalClient:
     async def fetch_device_info(self) -> None:
         """Feature flags and firmware version (static; fetch once)."""
         try:
-            resp = await self.send_command(TOPIC_CMD_GET_FEATURE_LIST, check=False)
+            resp = await self.send_command(TOPIC_CMD_GET_FEATURE_LIST, check=False, retry=False, wake=False)
             self.state.features = {k: v for k, v in resp.message.items() if not k.startswith("#")}
         except NarwalCommandError:
             _LOGGER.debug("get_feature_list failed")
         try:
-            resp = await self.send_command(TOPIC_CMD_GET_FIRMWARE_VERSION, check=False)
+            resp = await self.send_command(TOPIC_CMD_GET_FIRMWARE_VERSION, check=False, retry=False, wake=False)
             text = resp.message.get("firmwareVersionText")
             if not text:
-                resp = await self.send_command(TOPIC_CMD_GET_DEVICE_INFO, check=False, response_type="")
+                resp = await self.send_command(TOPIC_CMD_GET_DEVICE_INFO, check=False, response_type="", retry=False, wake=False)
                 text = _device_info_version(resp.raw)
             self.state.firmware_version = (text or "").strip()
         except NarwalCommandError:
             _LOGGER.debug("firmware version query failed")
 
-    async def get_map(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=20.0)
+    async def get_map(self, wake: bool = False) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=20.0, retry=wake, wake=wake)
 
     async def fetch_map(self) -> MapSnapshot | None:
         """Fetch the static map; updates rooms and map geometry in state."""
@@ -590,7 +661,8 @@ class NarwalClient:
         passes: int = 1,
     ) -> CommandResponse:
         """Start cleaning the given rooms (all known rooms if none given)."""
-        await self.notify_active()
+        if self.probably_asleep():
+            await self.wake()
         if not room_ids:
             if not self.state.rooms or self.state.map is None:
                 await self.fetch_rooms()
