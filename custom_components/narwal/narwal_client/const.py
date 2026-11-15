@@ -21,6 +21,20 @@ WAKE_TIMEOUTS: tuple[float, ...] = (1, 1, 2, 2, 4, 4, 8, 8, 16, 30)
 # (while awake and registered it pushes status every ~2 s).
 ASLEEP_AFTER_SECONDS = 120
 
+# Product keys (first segment of the MQTT topic)
+PRODUCT_KEY_FREO_X_ULTRA = "EHf6cRNRGT"
+PRODUCT_KEY_FREO_X_PLUS = "3rIGshGNAj"
+PRODUCT_KEY_FREO_Z_ULTRA = "hEA7OEshlx"
+# Models whose app offers four suction levels: Quiet / Normal / Strong / Max
+# are FAN_LEVEL_MUTE / NORMAL / STRONG / DEEP (no SUPER). Freo X Plus: watched
+# live; Freo Z Ultra: app captures in #4 and #6's z-ultra branch (values 1-4).
+FOUR_LEVEL_SUCTION_PRODUCT_KEYS = frozenset({PRODUCT_KEY_FREO_X_PLUS, PRODUCT_KEY_FREO_Z_ULTRA})
+MODEL_NAMES = {
+    PRODUCT_KEY_FREO_X_ULTRA: "Freo X Ultra",
+    PRODUCT_KEY_FREO_X_PLUS: "Freo X Plus",
+    PRODUCT_KEY_FREO_Z_ULTRA: "Freo Z Ultra",
+}
+
 # --- Command topics (client -> robot) ---
 TOPIC_CMD_YELL = "common/yell"
 TOPIC_CMD_REBOOT = "common/reboot"

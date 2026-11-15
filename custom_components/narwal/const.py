@@ -2,7 +2,7 @@
 
 from homeassistant.const import Platform
 
-from .narwal_client.const import CleanMode, FanLevel, MopHumidity
+from .narwal_client.const import PRODUCT_KEY_FREO_X_PLUS, CleanMode, FanLevel, MopHumidity
 
 DOMAIN = "narwal"
 
@@ -40,6 +40,20 @@ REGION_OPTIONS = {
     "il": "Israel",
     "eu": "Europe",
     "cn": "China",
+}
+
+# Entities for base-station features. The Freo X Plus base only charges the
+# robot (no auto-empty, mop washing/drying, water tanks or detergent), although
+# its firmware still reports Ultra-style values for all of them.
+STATION_ENTITY_KEYS = frozenset({
+    "auto_empty", "quiet_auto_empty", "empty_dustbin",
+    "wash_mop", "dry_mop", "wash_and_dry_mop", "mop_dry_strength", "mop_wash_frequency",
+    "hot_water_wash", "clean_water_tank", "dirty_water_tank",
+    "detergent", "auto_detergent",
+})
+# Entity keys not created for a product key.
+UNSUPPORTED_ENTITY_KEYS: dict[str, frozenset[str]] = {
+    PRODUCT_KEY_FREO_X_PLUS: STATION_ENTITY_KEYS,
 }
 
 # Fan speed names shown in HA (order = app order).

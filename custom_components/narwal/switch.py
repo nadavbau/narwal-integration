@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalEntity, entity_supported
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,7 +49,9 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    entities: list[SwitchEntity] = [NarwalConfigSwitch(coordinator, d) for d in SWITCHES]
+    entities: list[SwitchEntity] = [
+        NarwalConfigSwitch(coordinator, d) for d in SWITCHES if entity_supported(coordinator, d.key)
+    ]
     entities.append(NarwalDndSwitch(coordinator))
     async_add_entities(entities)
 
